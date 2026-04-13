@@ -43,7 +43,6 @@ import { isPathPluginSpec, parsePluginSpecifier, resolvePathPluginTarget } from 
 import { Npm } from "@/npm"
 
 export namespace Config {
-  const ModelId = z.string().meta({ $ref: "https://models.dev/model-schema.json#/$defs/Model" })
   const PluginOptions = z.record(z.string(), z.unknown())
   export const PluginSpec = z.union([z.string(), z.tuple([z.string(), PluginOptions])])
 
