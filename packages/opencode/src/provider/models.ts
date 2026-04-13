@@ -90,7 +90,7 @@ export namespace ModelsDev {
     return result as Record<string, Provider>
   }
 
-  export async function refresh() {
+  export async function refresh(_force?: boolean) {
     ModelsDev.Data.reset()
   }
 }
