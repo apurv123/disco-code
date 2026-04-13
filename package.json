@@ -90,6 +90,11 @@
     "@opencode-ai/plugin": "workspace:*",
     "@opencode-ai/script": "workspace:*",
     "@opencode-ai/sdk": "workspace:*",
+    "@stripe/stripe-js": "8.6.1",
+    "effect": "4.0.0-beta.43",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "solid-js": "1.9.10",
     "typescript": "catalog:"
   },
   "repository": {
