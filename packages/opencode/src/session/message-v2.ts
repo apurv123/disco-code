@@ -590,14 +590,7 @@ export namespace MessageV2 {
     // Only apply this workaround if the model actually supports image input -
     // otherwise there's no point extracting images.
     const supportsMediaInToolResults = (() => {
-      if (model.api.npm === "@ai-sdk/anthropic") return true
-      if (model.api.npm === "@ai-sdk/openai") return true
-      if (model.api.npm === "@ai-sdk/amazon-bedrock") return true
-      if (model.api.npm === "@ai-sdk/google-vertex/anthropic") return true
-      if (model.api.npm === "@ai-sdk/google") {
-        const id = model.api.id.toLowerCase()
-        return id.includes("gemini-3") && !id.includes("gemini-2")
-      }
+      if (model.api.npm === "@ai-sdk/openai-compatible") return true
       return false
     })()
 
