@@ -43,7 +43,6 @@ import { isPathPluginSpec, parsePluginSpecifier, resolvePathPluginTarget } from 
 import { Npm } from "@/npm"
 
 export namespace Config {
-  const ModelId = z.string().meta({ $ref: "https://models.dev/model-schema.json#/$defs/Model" })
   const PluginOptions = z.record(z.string(), z.unknown())
   export const PluginSpec = z.union([z.string(), z.tuple([z.string(), PluginOptions])])
 
@@ -504,7 +503,7 @@ export namespace Config {
     template: z.string(),
     description: z.string().optional(),
     agent: z.string().optional(),
-    model: ModelId.optional(),
+    model: z.string().optional(),
     subtask: z.boolean().optional(),
   })
   export type Command = z.infer<typeof Command>
@@ -520,7 +519,7 @@ export namespace Config {
 
   export const Agent = z
     .object({
-      model: ModelId.optional(),
+      model: z.string().optional(),
       variant: z
         .string()
         .optional()
@@ -889,10 +888,11 @@ export namespace Config {
         .array(z.string())
         .optional()
         .describe("When set, ONLY these providers will be enabled. All other providers will be ignored"),
-      model: ModelId.describe("Model to use in the format of provider/model, eg anthropic/claude-2").optional(),
-      small_model: ModelId.describe(
-        "Small model to use for tasks like title generation in the format of provider/model",
-      ).optional(),
+      model: z.string().describe("Model to use in the format of provider/model, eg anthropic/claude-2").optional(),
+      small_model: z
+        .string()
+        .describe("Small model to use for tasks like title generation in the format of provider/model")
+        .optional(),
       default_agent: z
         .string()
         .optional()
