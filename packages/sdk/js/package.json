@@ -29,6 +29,6 @@
     "typescript": "catalog:"
   },
   "dependencies": {
-    "cross-spawn": "catalog:"
+    "cross-spawn": "7.0.6"
   }
 }
