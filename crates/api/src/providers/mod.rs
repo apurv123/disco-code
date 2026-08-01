@@ -205,6 +205,9 @@ const MODEL_REGISTRY: &[(&str, ProviderMetadata)] = &[
 #[must_use]
 pub fn resolve_model_alias(model: &str) -> String {
     let trimmed = model.trim();
+    if trimmed == crate::ollama::AUTO {
+        return crate::ollama::resolve();
+    }
     let lower = trimmed.to_ascii_lowercase();
     MODEL_REGISTRY
         .iter()
@@ -358,40 +361,18 @@ fn looks_like_local_openai_model(model: &str) -> bool {
     model.contains(':') || model.contains('.')
 }
 
+/// Disco Code performs inference exclusively against a local Ollama daemon.
+///
+/// Provider selection is therefore not a decision: it is fixed at compile time.
+/// Model names, ambient API keys, and base-URL environment variables cannot
+/// route traffic anywhere else, which is what makes the local-inference
+/// guarantee hold even if a user has cloud credentials in their environment.
+///
+/// Ollama speaks the OpenAI wire format at `<host>/v1`, so the OpenAI-compatible
+/// transport carries the traffic; the endpoint it is pointed at is always local.
 #[must_use]
-pub fn detect_provider_kind(model: &str) -> ProviderKind {
-    // OLLAMA_HOST takes priority: if set, route all models through the local
-    // OpenAI-compatible endpoint regardless of model name or other env vars.
-    if std::env::var_os("OLLAMA_HOST").is_some() {
-        return ProviderKind::OpenAi;
-    }
-    let resolved_model = resolve_model_alias(model);
-    if let Some(metadata) = metadata_for_model(&resolved_model) {
-        return metadata.provider;
-    }
-    // When OPENAI_BASE_URL is set and the unknown model name looks like a
-    // local server tag (for example `llama3.2` or `qwen2.5-coder:7b`), prefer
-    // the OpenAI-compatible endpoint over ambient Anthropic credentials.
-    if std::env::var_os("OPENAI_BASE_URL").is_some()
-        && looks_like_local_openai_model(&resolved_model)
-    {
-        return ProviderKind::OpenAi;
-    }
-    if anthropic::has_auth_from_env_or_saved().unwrap_or(false) {
-        return ProviderKind::Anthropic;
-    }
-    if openai_compat::has_api_key("OPENAI_API_KEY") {
-        return ProviderKind::OpenAi;
-    }
-    if openai_compat::has_api_key("XAI_API_KEY") {
-        return ProviderKind::Xai;
-    }
-    // Last resort: if OPENAI_BASE_URL is set without OPENAI_API_KEY (some
-    // local providers like Ollama don't require auth), still route there.
-    if std::env::var_os("OPENAI_BASE_URL").is_some() {
-        return ProviderKind::OpenAi;
-    }
-    ProviderKind::Anthropic
+pub const fn detect_provider_kind(_model: &str) -> ProviderKind {
+    ProviderKind::OpenAi
 }
 
 #[must_use]
@@ -903,12 +884,9 @@ mod tests {
     }
 
     #[test]
-    fn detects_provider_from_model_name_first() {
-        assert_eq!(detect_provider_kind("grok"), ProviderKind::Xai);
-        assert_eq!(
-            detect_provider_kind("claude-sonnet-4-6"),
-            ProviderKind::Anthropic
-        );
+    fn detects_the_local_provider_regardless_of_model_name() {
+        assert_eq!(detect_provider_kind("grok"), ProviderKind::OpenAi);
+        assert_eq!(detect_provider_kind("claude-sonnet-4-6"), ProviderKind::OpenAi);
     }
 
     #[test]
@@ -930,21 +908,16 @@ mod tests {
     }
 
     #[test]
-    fn maps_model_name_to_model_family_identity() {
-        // given: Anthropic, OpenAI-compatible, and xAI model names
-        let claude_model = "claude-opus-4-6";
-        let openai_model = "openai/gpt-4.1-mini";
-        let xai_model = "grok-3";
-
-        // when: detecting prompt model family identities from model names
-        let claude_identity = model_family_identity_for(claude_model);
-        let openai_identity = model_family_identity_for(openai_model);
-        let xai_identity = model_family_identity_for(xai_model);
-
-        // then: Anthropic stays Claude and OpenAI-compatible providers are generic
-        assert_eq!(claude_identity, runtime::ModelFamilyIdentity::Claude);
-        assert_eq!(openai_identity, runtime::ModelFamilyIdentity::Generic);
-        assert_eq!(xai_identity, runtime::ModelFamilyIdentity::Generic);
+    fn every_model_name_maps_to_a_generic_family_identity() {
+        // Inference is local, so no model may claim a frontier vendor identity
+        // simply because of how it is named.
+        for model in ["claude-opus-4-6", "openai/gpt-4.1-mini", "grok-3"] {
+            assert_eq!(
+                model_family_identity_for(model),
+                runtime::ModelFamilyIdentity::Generic,
+                "{model} must resolve to a generic identity"
+            );
+        }
     }
 
     #[test]

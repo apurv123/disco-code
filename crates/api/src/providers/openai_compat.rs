@@ -117,6 +117,45 @@ pub struct OpenAiCompatClient {
     max_backoff: Duration,
 }
 
+/// Connect timeout for the local daemon.
+///
+/// Inference is served from this machine, so establishing the socket is a
+/// loopback operation that takes microseconds when Ollama is up. The 30s
+/// default exists to tolerate congested internet paths and is pure dead weight
+/// here: it only delays the report that the daemon is down. Windows makes this
+/// acute, since connecting to a closed local port sits in `SYN_SENT` and
+/// retransmits instead of refusing immediately the way Unix does.
+const OLLAMA_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Retry policy for the local daemon.
+///
+/// A cloud endpoint deserves many attempts across a long backoff because
+/// failures there are usually transient and remote. A daemon on localhost is
+/// either running or it is not, so the cloud defaults (8 retries over a 255s
+/// backoff) turn "Ollama isn't started" into a multi-minute stall. A couple of
+/// quick attempts still absorb the genuine case — a daemon busy loading a model
+/// into memory — without the agent appearing to hang.
+const OLLAMA_MAX_RETRIES: u32 = 2;
+const OLLAMA_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const OLLAMA_MAX_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Builds the HTTP client used for local inference.
+///
+/// The request timeout deliberately keeps the generous default: generation on a
+/// local model legitimately runs for minutes, and that is a healthy daemon
+/// working, not a stall. Only connection establishment is tightened.
+fn ollama_http_client() -> reqwest::Client {
+    let timeouts = crate::http_client::TimeoutConfig {
+        connect_timeout: OLLAMA_CONNECT_TIMEOUT,
+        ..crate::http_client::TimeoutConfig::from_env()
+    };
+    crate::http_client::build_http_client_with_opts(
+        &crate::http_client::ProxyConfig::from_env(),
+        &timeouts,
+    )
+    .unwrap_or_else(|_| build_http_client_or_default())
+}
+
 impl OpenAiCompatClient {
     const fn config(&self) -> OpenAiCompatConfig {
         self.config
@@ -157,20 +196,22 @@ impl OpenAiCompatClient {
         };
         Ok(Self::new(api_key, config).with_base_url(base_url))
     }
-    /// Create an Ollama client from `OLLAMA_HOST` env var.
-    /// Ollama requires no API key; a placeholder is used for the Authorization header.
-    pub fn from_ollama_env() -> Option<Self> {
-        let host =
-            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-        let base_url = format!("{}/v1", host.trim_end_matches('/'));
+    /// Creates the Ollama client. Disco Code's only inference client.
+    ///
+    /// Ollama requires no credentials; a placeholder fills the Authorization
+    /// header that the OpenAI wire format expects. The address is resolved and
+    /// normalized centrally, so a scheme-less `OLLAMA_HOST` such as
+    /// `127.0.0.1:11434` still produces a valid base URL.
+    #[must_use]
+    pub fn ollama() -> Option<Self> {
         Some(Self {
-            http: build_http_client_or_default(),
+            http: ollama_http_client(),
             api_key: "ollama".to_string(),
             config: OLLAMA_CONFIG,
-            base_url,
-            max_retries: DEFAULT_MAX_RETRIES,
-            initial_backoff: DEFAULT_INITIAL_BACKOFF,
-            max_backoff: DEFAULT_MAX_BACKOFF,
+            base_url: crate::ollama::base(),
+            max_retries: OLLAMA_MAX_RETRIES,
+            initial_backoff: OLLAMA_INITIAL_BACKOFF,
+            max_backoff: OLLAMA_MAX_BACKOFF,
         })
     }
 

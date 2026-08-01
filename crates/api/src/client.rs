@@ -2,7 +2,7 @@ use crate::error::ApiError;
 use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 use crate::providers::anthropic::{self, AnthropicClient, AuthSource};
 use crate::providers::openai_compat::{self, OpenAiCompatClient, OpenAiCompatConfig};
-use crate::providers::{self, ProviderKind};
+use crate::providers::ProviderKind;
 use crate::types::{MessageRequest, MessageResponse, StreamEvent};
 
 #[allow(clippy::large_enum_variant)]
@@ -20,39 +20,15 @@ impl ProviderClient {
 
     pub fn from_model_with_anthropic_auth(
         model: &str,
-        anthropic_auth: Option<AuthSource>,
+        _anthropic_auth: Option<AuthSource>,
     ) -> Result<Self, ApiError> {
-        let resolved_model = providers::resolve_model_alias(model);
-        match providers::detect_provider_kind(&resolved_model) {
-            ProviderKind::Anthropic => Ok(Self::Anthropic(match anthropic_auth {
-                Some(auth) => AnthropicClient::from_auth(auth),
-                None => AnthropicClient::from_env()?,
-            })),
-            ProviderKind::Xai => Ok(Self::Xai(OpenAiCompatClient::from_env(
-                OpenAiCompatConfig::xai(),
-            )?)),
-            ProviderKind::OpenAi => {
-                // OLLAMA_HOST takes priority: local Ollama needs no API key
-                // and ignores DashScope/OpenAI env-based dispatch.
-                if std::env::var_os("OLLAMA_HOST").is_some() {
-                    Ok(Self::OpenAi(
-                        openai_compat::OpenAiCompatClient::from_ollama_env()
-                            .expect("from_ollama_env always returns Some"),
-                    ))
-                } else {
-                    // DashScope models (qwen-*) also return ProviderKind::OpenAi because they
-                    // speak the OpenAI wire format, but they need the DashScope config which
-                    // reads DASHSCOPE_API_KEY and points at dashscope.aliyuncs.com.
-                    let config = match providers::metadata_for_model(&resolved_model) {
-                        Some(meta) if meta.auth_env == "DASHSCOPE_API_KEY" => {
-                            OpenAiCompatConfig::dashscope()
-                        }
-                        _ => OpenAiCompatConfig::openai(),
-                    };
-                    Ok(Self::OpenAi(OpenAiCompatClient::from_env(config)?))
-                }
-            }
-        }
+        let _ = model;
+        // Inference is Ollama-only and needs no credentials, so there is nothing
+        // to dispatch on. Any saved cloud auth is deliberately ignored.
+        Ok(Self::OpenAi(
+            openai_compat::OpenAiCompatClient::ollama()
+                .expect("ollama client construction is infallible"),
+        ))
     }
 
     #[must_use]
@@ -176,12 +152,11 @@ mod tests {
     }
 
     #[test]
-    fn provider_detection_prefers_model_family() {
-        assert_eq!(detect_provider_kind("grok-3"), ProviderKind::Xai);
-        assert_eq!(
-            detect_provider_kind("claude-sonnet-4-6"),
-            ProviderKind::Anthropic
-        );
+    fn provider_detection_is_fixed_to_the_local_ollama_surface() {
+        // Model naming no longer selects a provider: everything runs locally.
+        assert_eq!(detect_provider_kind("grok-3"), ProviderKind::OpenAi);
+        assert_eq!(detect_provider_kind("claude-sonnet-4-6"), ProviderKind::OpenAi);
+        assert_eq!(detect_provider_kind("qwen3.5:9b"), ProviderKind::OpenAi);
     }
 
     /// Snapshot-restore guard for a single environment variable. Mirrors
@@ -214,52 +189,41 @@ mod tests {
     }
 
     #[test]
-    fn dashscope_model_uses_dashscope_config_not_openai() {
-        // Regression: qwen-plus was being routed to OpenAiCompatConfig::openai()
-        // which reads OPENAI_API_KEY and points at api.openai.com, when it should
-        // use OpenAiCompatConfig::dashscope() which reads DASHSCOPE_API_KEY and
-        // points at dashscope.aliyuncs.com.
+    fn hosted_credentials_in_the_environment_cannot_redirect_inference() {
+        // A user may legitimately have cloud keys set for other tools. They must
+        // never cause Disco Code to send code off the machine.
         let _lock = env_lock();
         let _dashscope = EnvVarGuard::set("DASHSCOPE_API_KEY", Some("test-dashscope-key"));
-        let _openai = EnvVarGuard::set("OPENAI_API_KEY", None);
+        let _openai = EnvVarGuard::set("OPENAI_API_KEY", Some("test-openai-key"));
+        let _anthropic = EnvVarGuard::set("ANTHROPIC_API_KEY", Some("test-anthropic-key"));
 
-        let client = ProviderClient::from_model("qwen-plus");
-
-        // Must succeed (not fail with "missing OPENAI_API_KEY")
-        assert!(
-            client.is_ok(),
-            "qwen-plus with DASHSCOPE_API_KEY set should build successfully, got: {:?}",
-            client.err()
-        );
-
-        // Verify it's the OpenAi variant pointed at the DashScope base URL.
-        match client.unwrap() {
-            ProviderClient::OpenAi(openai_client) => {
+        match ProviderClient::from_model("qwen-plus").expect("client should build without auth") {
+            ProviderClient::OpenAi(client) => {
+                let base = client.base_url().to_lowercase();
                 assert!(
-                    openai_client.base_url().contains("dashscope.aliyuncs.com"),
-                    "qwen-plus should route to DashScope base URL (contains 'dashscope.aliyuncs.com'), got: {}",
-                    openai_client.base_url()
+                    !base.contains("dashscope.aliyuncs.com") && !base.contains("api.openai.com"),
+                    "hosted keys must not redirect inference, got: {base}"
                 );
+                assert!(base.contains("11434"), "expected the Ollama port, got: {base}");
             }
-            other => panic!("Expected ProviderClient::OpenAi for qwen-plus, got: {other:?}"),
+            other => panic!("expected the local Ollama client, got: {other:?}"),
         }
     }
 
     #[test]
-    fn local_openai_base_url_routes_authless_ollama_models() {
+    fn openai_base_url_override_cannot_repoint_inference() {
         let _lock = env_lock();
-        let _base_url = EnvVarGuard::set("OPENAI_BASE_URL", Some("http://127.0.0.1:11434/v1"));
-        let _openai_key = EnvVarGuard::set("OPENAI_API_KEY", None);
-        let _anthropic_key = EnvVarGuard::set("ANTHROPIC_API_KEY", Some("test-anthropic-key"));
-        let _anthropic_token = EnvVarGuard::set("ANTHROPIC_AUTH_TOKEN", None);
+        // Even an explicit remote override is ignored; the route is compiled in.
+        let _base_url = EnvVarGuard::set("OPENAI_BASE_URL", Some("https://api.openai.com/v1"));
+        let _openai_key = EnvVarGuard::set("OPENAI_API_KEY", Some("test-openai-key"));
 
-        let client = ProviderClient::from_model("qwen2.5-coder:7b")
-            .expect("local model should route to OpenAI-compatible client without auth");
-        match client {
-            ProviderClient::OpenAi(openai_client) => {
-                assert_eq!(openai_client.base_url(), "http://127.0.0.1:11434/v1")
-            }
-            other => panic!("Expected ProviderClient::OpenAi for local model, got: {other:?}"),
+        match ProviderClient::from_model("qwen2.5-coder:7b").expect("local model should resolve") {
+            ProviderClient::OpenAi(client) => assert!(
+                !client.base_url().contains("api.openai.com"),
+                "OPENAI_BASE_URL must not repoint inference, got: {}",
+                client.base_url()
+            ),
+            other => panic!("expected the local Ollama client, got: {other:?}"),
         }
     }
 }

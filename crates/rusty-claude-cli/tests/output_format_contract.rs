@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use runtime::Session;
 use serde_json::{json, Value};
@@ -806,7 +806,10 @@ fn status_json_warns_on_invalid_model_env_426() {
         ),
         ("HOME", home.to_str().expect("utf8 home")),
         ("CLAW_MODEL", ""),
-        ("ANTHROPIC_MODEL", "bogus-model-xyz"),
+        // Whitespace can never appear in an Ollama model name. A merely
+        // unrecognised name is no longer invalid: the valid set is whatever the
+        // user has pulled, which only the daemon can answer.
+        ("ANTHROPIC_MODEL", "bogus model xyz"),
         ("ANTHROPIC_DEFAULT_MODEL", ""),
     ];
     let output = run_claw(&root, &["--output-format", "json", "status"], &envs);
@@ -827,7 +830,7 @@ fn status_json_warns_on_invalid_model_env_426() {
         parsed["model_validation_error"]
             .as_str()
             .is_some_and(|message| message.contains("ANTHROPIC_MODEL")
-                && message.contains("bogus-model-xyz")),
+                && message.contains("bogus model xyz")),
         "warning should name env var and raw model: {parsed}"
     );
     assert!(
@@ -2641,7 +2644,55 @@ fn run_claw(current_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output 
     for (key, value) in envs {
         command.env(key, value);
     }
-    command.output().expect("claw should launch")
+    // Contract tests assert on argument parsing and envelope shape, never on
+    // model output. Pointing them at a closed port keeps them hermetic and fast:
+    // without this a developer with Ollama running would have every prompt test
+    // perform real inference.
+    if !envs.iter().any(|(key, _)| *key == "OLLAMA_HOST") {
+        command.env("OLLAMA_HOST", "127.0.0.1:1");
+    }
+    run_with_watchdog(command)
+}
+
+/// Upper bound on how long any single contract invocation may take.
+///
+/// These tests exercise argument parsing and envelope shape, so every one of
+/// them should finish in well under a second. The generous ceiling exists only
+/// to convert a hang into a failure.
+const CLAW_WATCHDOG: Duration = Duration::from_secs(60);
+
+/// Runs `claw` under a deadline.
+///
+/// Without this a bug that stalls the CLI — an unbounded network wait, say —
+/// hangs the whole suite with no indication of which test is stuck, and the
+/// run has to be killed by hand. Killing the child turns that into one failing
+/// test that names itself.
+fn run_with_watchdog(mut command: Command) -> Output {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("claw should launch");
+
+    let deadline = Instant::now() + CLAW_WATCHDOG;
+    loop {
+        match child.try_wait().expect("claw status should be observable") {
+            Some(_) => break,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "claw exceeded the {CLAW_WATCHDOG:?} watchdog and was killed; \
+                     this is a hang, not a slow test"
+                );
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+
+    child
+        .wait_with_output()
+        .expect("claw output should be readable")
 }
 
 fn parse_json_stdout(output: &Output, context: &str) -> Value {
@@ -2815,6 +2866,7 @@ fn diff_json_changed_file_count_deduplication_733() {
     // Clean state: changed_file_count must be 0
     let bin = env!("CARGO_BIN_EXE_claw");
     let clean = Command::new(bin)
+        .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "diff"])
         .output()
@@ -2839,6 +2891,7 @@ fn diff_json_changed_file_count_deduplication_733() {
 
     // Dirty state: same file appears in staged+unstaged — must deduplicate to count 1
     let dirty = Command::new(bin)
+        .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "diff"])
         .output()
@@ -2867,6 +2920,7 @@ fn prompt_no_arg_json_error_kind_750() {
     let bin = env!("CARGO_BIN_EXE_claw");
 
     let output = Command::new(bin)
+        .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "prompt"])
         .output()
@@ -2916,6 +2970,7 @@ fn prompt_empty_arg_json_stdout_missing_prompt_823() {
     let bin = env!("CARGO_BIN_EXE_claw");
 
     let output = Command::new(bin)
+        .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "prompt", ""])
         .output()
@@ -2961,6 +3016,7 @@ fn flag_value_errors_have_error_kind_and_hint_756() {
 
     // Case 1: --reasoning-effort with invalid value
     let out = Command::new(bin)
+        .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "--reasoning-effort", "HIGH"])
         .output()
@@ -2991,6 +3047,7 @@ fn flag_value_errors_have_error_kind_and_hint_756() {
 
     // Case 2: --model flag with missing value (trailing flag)
     let out2 = Command::new(bin)
+        .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "--model"])
         .output()
@@ -3209,18 +3266,19 @@ fn short_p_flag_swallows_no_flags_755() {
     fs::create_dir_all(&root).expect("temp dir");
     let bin = env!("CARGO_BIN_EXE_claw");
 
-    // -p hello --output-format json: with no credentials, should fail with
-    // missing_credentials (not missing_prompt), proving --output-format json was parsed.
+    // -p hello --output-format json: pointed at a dead daemon, this fails on the
+    // provider path rather than the parse path, proving --output-format json was
+    // parsed as a flag instead of being swallowed into the prompt.
     let output = Command::new(bin)
+        .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["-p", "hello", "--output-format", "json"])
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env("OLLAMA_HOST", "127.0.0.1:1")
         .output()
         .expect("claw -p should run");
     assert!(
         !output.status.success(),
-        "claw -p hello --output-format json must exit non-zero (no credentials)"
+        "claw -p hello --output-format json must exit non-zero (daemon unreachable)"
     );
     // #819/#820/#823: abort envelopes route to stdout in JSON mode
     let raw = String::from_utf8_lossy(&output.stdout)
@@ -3232,13 +3290,14 @@ fn short_p_flag_swallows_no_flags_755() {
     let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|_| {
         panic!("--output-format json must be parsed as a flag, not prompt text; stdout: {raw}")
     });
-    assert_eq!(
-        parsed["error_kind"], "missing_credentials",
+    assert_ne!(
+        parsed["error_kind"], "missing_prompt",
         "flags after -p prompt text must be parsed normally (#755); got: {parsed}"
     );
 
     // Also verify -p --model bogus is rejected as missing_prompt (flag-as-prompt guard)
     let output2 = Command::new(bin)
+        .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "-p", "--model", "sonnet"])
         .output()
@@ -3271,6 +3330,7 @@ fn short_p_flag_no_arg_json_error_kind_753() {
     let bin = env!("CARGO_BIN_EXE_claw");
 
     let output = Command::new(bin)
+        .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "-p"])
         .output()
@@ -3320,6 +3380,7 @@ fn bare_slash_command_hint_745() {
     // All must emit non-null hint in their interactive_only error envelope.
     for cmd in &["issue", "pr", "commit"] {
         let output = Command::new(bin)
+            .env("OLLAMA_HOST", "127.0.0.1:1")
             .current_dir(&root)
             .args(["--output-format", "json", cmd])
             .env("ANTHROPIC_API_KEY", "test")
@@ -3367,6 +3428,7 @@ fn config_unsupported_section_json_hint_741() {
 
     for section in &["list", "show", "bogus"] {
         let output = Command::new(bin)
+            .env("OLLAMA_HOST", "127.0.0.1:1")
             .current_dir(&root)
             .args(["--output-format", "json", "config", section])
             .output()
@@ -3411,6 +3473,7 @@ fn config_help_returns_structured_section_list_344() {
     fs::create_dir_all(&root).expect("temp dir");
     let bin = env!("CARGO_BIN_EXE_claw");
     let output = Command::new(bin)
+        .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "config", "help"])
         .output()
@@ -3445,6 +3508,7 @@ fn export_json_has_kind_702() {
     use std::process::Command;
     let bin = env!("CARGO_BIN_EXE_claw");
     let output = Command::new(bin)
+        .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "export"])
         .env("ANTHROPIC_API_KEY", "test")
@@ -5828,9 +5892,7 @@ fn compact_flag_missing_argument_and_shorthand_prompt_contract_435() {
             config_home.to_str().expect("config home utf8"),
         ),
         ("HOME", home.to_str().expect("home utf8")),
-        ("ANTHROPIC_API_KEY", ""),
-        ("ANTHROPIC_AUTH_TOKEN", ""),
-        ("OPENAI_API_KEY", ""),
+        ("OLLAMA_HOST", "127.0.0.1:1"),
     ];
 
     let missing = run_claw(&root, &["--output-format", "json", "--compact"], &envs);
@@ -5856,8 +5918,8 @@ fn compact_flag_missing_argument_and_shorthand_prompt_contract_435() {
         String::from_utf8_lossy(&prompt.stderr)
     );
     let prompt_json = parse_json_stdout(&prompt, "compact shorthand prompt");
-    assert_eq!(
-        prompt_json["error_kind"], "missing_credentials",
+    assert_ne!(
+        prompt_json["error_kind"], "command_not_found",
         "--compact hello should stay on the prompt/provider path, not command_not_found: {prompt_json}"
     );
 }

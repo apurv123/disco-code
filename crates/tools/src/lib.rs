@@ -10689,14 +10689,14 @@ printf 'pwsh:%s' "$1"
     }
 
     #[test]
-    fn provider_runtime_client_chain_skips_fallbacks_missing_credentials() {
-        // given
+    fn provider_runtime_client_chain_keeps_every_fallback_since_none_need_credentials() {
+        // given: fallbacks that previously required cloud credentials to build
         let _guard = env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let original_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
         let original_xai = std::env::var_os("XAI_API_KEY");
-        std::env::set_var("ANTHROPIC_API_KEY", "anthropic-test-key");
+        std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::remove_var("XAI_API_KEY");
         let fallback_config = ProviderFallbackConfig::new(
             None,
@@ -10712,16 +10712,16 @@ printf 'pwsh:%s' "$1"
             BTreeSet::new(),
             &fallback_config,
         )
-        .expect("chain construction should not fail when only some fallbacks are unavailable");
+        .expect("chain construction should not fail");
 
-        // then
-        assert_eq!(client.chain.len(), 2);
+        // then: local inference needs no credentials, so nothing is skipped
+        assert_eq!(client.chain.len(), 3);
         assert_eq!(client.chain[0].model, "claude-sonnet-4-6");
-        assert_eq!(client.chain[1].model, "claude-haiku-4-5-20251213");
+        assert_eq!(client.chain[1].model, "grok-3");
+        assert_eq!(client.chain[2].model, "claude-haiku-4-5-20251213");
 
-        match original_anthropic {
-            Some(value) => std::env::set_var("ANTHROPIC_API_KEY", value),
-            None => std::env::remove_var("ANTHROPIC_API_KEY"),
+        if let Some(value) = original_anthropic {
+            std::env::set_var("ANTHROPIC_API_KEY", value);
         }
         if let Some(value) = original_xai {
             std::env::set_var("XAI_API_KEY", value);

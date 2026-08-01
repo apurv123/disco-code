@@ -1,10 +1,17 @@
 mod client;
 mod error;
 mod http_client;
+mod ollama;
 mod prompt_cache;
 mod providers;
 mod sse;
 mod types;
+
+pub use ollama::{
+    base as ollama_base, choose as ollama_choose, host as ollama_host, list as ollama_list,
+    pick as ollama_pick, resolve as ollama_resolve, tags as ollama_tags, Caps as OllamaCaps,
+    Model as OllamaModel, AUTO as OLLAMA_AUTO, DEFAULT_HOST as OLLAMA_DEFAULT_HOST,
+};
 
 pub use client::{
     oauth_token_is_expired, read_base_url, read_xai_base_url, resolve_saved_oauth_token,

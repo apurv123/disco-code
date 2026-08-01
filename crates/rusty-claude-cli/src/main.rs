@@ -70,7 +70,16 @@ use tools::{
     RuntimeToolDefinition, ToolSearchOutput,
 };
 
-const DEFAULT_MODEL: &str = "anthropic/claude-opus-4-7";
+/// Model used when neither a flag, environment variable, nor config selects one.
+///
+/// This is a placeholder rather than a real model name: the usable models are
+/// whichever ones the user has pulled, so the choice is deferred to the moment
+/// inference actually happens. Keeping it inert means startup — and every
+/// command that never talks to a model — stays entirely offline.
+const fn default_model() -> &'static str {
+    api::OLLAMA_AUTO
+}
+
 
 /// #148: Model provenance for `claw status` JSON/text output. Records where
 /// the resolved model string came from so claws don't have to re-read argv
@@ -85,7 +94,7 @@ enum ModelSource {
     /// `model` key in `.claw.json` / `.claw/settings.json` (when neither
     /// flag nor env set it).
     Config,
-    /// Compiled-in `DEFAULT_MODEL` fallback.
+    /// Compiled-in `default_model()` fallback.
     Default,
 }
 
@@ -169,7 +178,7 @@ struct EnvModel {
 impl ModelProvenance {
     fn default_fallback() -> Self {
         Self {
-            resolved: DEFAULT_MODEL.to_string(),
+            resolved: default_model().to_string(),
             raw: None,
             source: ModelSource::Default,
             alias_resolved_to: None,
@@ -207,7 +216,7 @@ impl ModelProvenance {
         // Only called when no --model flag was passed. Probe env first,
         // then config, else fall back to default. Mirrors the logic in
         // resolve_repl_model() but captures the source.
-        if cli_model != DEFAULT_MODEL {
+        if cli_model != default_model() {
             let provenance = Self::from_resolved(cli_model, cli_model, ModelSource::Flag, None);
             provenance.validate()?;
             return Ok(provenance);
@@ -1477,7 +1486,7 @@ impl CliOutputFormat {
 
 #[allow(clippy::too_many_lines)]
 fn parse_args(args: &[String]) -> Result<CliAction, String> {
-    let mut model = DEFAULT_MODEL.to_string();
+    let mut model = default_model().to_string();
     // #148: when user passes --model/--model=, capture the raw input so we
     // can attribute source: "flag" later. None means no flag was supplied.
     let mut model_flag_raw: Option<String> = None;
@@ -2922,58 +2931,23 @@ fn resolve_model_alias_with_config(model: &str) -> String {
 /// Validate model syntax at parse time.
 /// Accepts: known aliases (opus, sonnet, haiku) or provider/model pattern.
 /// Rejects: empty, whitespace-only, strings with spaces, or invalid chars.
+/// Checks that a model string is well-formed as an Ollama model reference.
+///
+/// Ollama names models with a `name:tag` scheme — `qwen3.5:9b` — rather than the
+/// `provider/model` form a multi-provider client needs, and the set of valid
+/// names is whatever the user has pulled. That set is only knowable by asking
+/// the daemon, so this stays a pure syntax check: it rejects strings that could
+/// never be a model reference and leaves "does this model exist" to the daemon,
+/// which answers authoritatively at request time.
 fn validate_model_syntax(model: &str) -> Result<(), String> {
     let trimmed = model.trim();
-    // Ollama models use names like "qwen3:8b" that don't match provider/model
-    // syntax. Skip strict validation when OLLAMA_HOST is configured.
-    if std::env::var_os("OLLAMA_HOST").is_some() {
-        if trimmed.is_empty() {
-            return Err("invalid model syntax: model string cannot be empty.\nUsage: --model <model-name>  e.g. --model qwen3:8b".to_string());
-        }
-        return Ok(());
-    }
     if trimmed.is_empty() {
-        return Err("invalid model syntax: model string cannot be empty.\nUsage: --model <provider/model>  e.g. --model anthropic/claude-opus-4-7".to_string());
+        return Err("invalid model syntax: model string cannot be empty.\nUsage: --model <model-name>  e.g. --model qwen3.5:9b\nRun `claw models` to list the models Ollama has available.".to_string());
     }
-    // Check for spaces (malformed)
-    if trimmed.contains(' ') {
+    if trimmed.contains(char::is_whitespace) {
         return Err(format!(
-            "invalid model syntax: '{}' contains spaces.\nUse provider/model format (e.g., anthropic/claude-opus-4-7) or a known alias.",
-            trimmed
+            "invalid model syntax: '{trimmed}' contains whitespace.\nOllama model names look like `qwen3.5:9b` or `gemma4:e4b`.\nRun `claw models` to list the models Ollama has available."
         ));
-    }
-    if is_bare_provider_model(trimmed) {
-        return Ok(());
-    }
-    if is_local_openai_model_syntax(trimmed) {
-        return Ok(());
-    }
-    // Check provider/model format: provider_id/model_id
-    let parts: Vec<&str> = trimmed.split('/').collect();
-    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
-        // #154: hint if the model looks like it belongs to a different provider
-        let mut err_msg = format!(
-            "invalid model syntax: '{}'.\nExpected provider/model (e.g., anthropic/claude-opus-4-7)",
-            trimmed
-        );
-        if trimmed.starts_with("gpt-") || trimmed.starts_with("gpt_") {
-            err_msg.push_str("\nDid you mean `openai/");
-            err_msg.push_str(trimmed);
-            err_msg.push_str("`? (Requires OPENAI_API_KEY env var)");
-        } else if trimmed.starts_with("qwen") && trimmed.contains(':') {
-            err_msg.push_str("\nFor a local Ollama model, set `OPENAI_BASE_URL=http://127.0.0.1:11434/v1` before using tagged names like `");
-            err_msg.push_str(trimmed);
-            err_msg.push_str("`.");
-        } else if trimmed.starts_with("qwen") {
-            err_msg.push_str("\nDid you mean `qwen/");
-            err_msg.push_str(trimmed);
-            err_msg.push_str("`? (Requires DASHSCOPE_API_KEY env var)");
-        } else if trimmed.starts_with("grok") {
-            err_msg.push_str("\nDid you mean `xai/");
-            err_msg.push_str(trimmed);
-            err_msg.push_str("`? (Requires XAI_API_KEY env var)");
-        }
-        return Err(err_msg);
     }
     Ok(())
 }
@@ -3166,8 +3140,9 @@ fn provider_label(kind: ProviderKind) -> &'static str {
 }
 
 fn format_connected_line(model: &str) -> String {
-    let provider = provider_label(detect_provider_kind(model));
-    format!("Connected: {model} via {provider}")
+    // Inference is always the local Ollama daemon, so the provider is not
+    // derived from the model name.
+    format!("Connected: {model} via ollama")
 }
 
 fn filter_tool_specs(
@@ -6866,14 +6841,14 @@ fn run_resume_command(
                 session: session.clone(),
                 message: Some(format!(
                     "Models\n  Default          {}\n  Config model     {}",
-                    DEFAULT_MODEL,
+                    default_model(),
                     configured_model.as_deref().unwrap_or("<unset>")
                 )),
                 json: Some(serde_json::json!({
                     "kind": "models",
                     "action": "list",
                     "status": "ok",
-                    "default_model": DEFAULT_MODEL,
+                    "default_model": default_model(),
                     "configured_model": configured_model,
                     "resolved_model": resolved_config_model,
                     "requested_model": model,
@@ -10324,7 +10299,8 @@ fn print_models(
     match output_format {
         CliOutputFormat::Text => {
             println!("Models");
-            println!("  Default          {DEFAULT_MODEL}");
+            let default = default_model();
+        println!("  Default          {default}");
             println!("  Built-in aliases opus, sonnet, haiku");
             if let Some(raw) = configured_model.as_deref() {
                 println!(
@@ -10347,7 +10323,7 @@ fn print_models(
                     "kind": "models",
                     "action": "list",
                     "status": "ok",
-                    "default_model": DEFAULT_MODEL,
+                    "default_model": default_model(),
                     "aliases": [
                         {"name": "opus", "model": resolve_model_alias("opus")},
                         {"name": "sonnet", "model": resolve_model_alias("sonnet")},
@@ -14290,7 +14266,7 @@ mod tests {
         CliOutputFormat, CliToolExecutor, GitOperation, GitWorkspaceSummary,
         InternalPromptProgressEvent, InternalPromptProgressState, LiveCli, LocalHelpTopic,
         PermissionModeProvenance, PromptHistoryEntry, SessionLifecycleKind,
-        SessionLifecycleSummary, SlashCommand, StatusUsage, TmuxPaneSnapshot, DEFAULT_MODEL,
+        SessionLifecycleSummary, SlashCommand, StatusUsage, TmuxPaneSnapshot, default_model,
         LATEST_SESSION_REFERENCE, STUB_COMMANDS,
     };
     use api::{ApiError, MessageResponse, OutputContentBlock, Usage};
@@ -14635,7 +14611,7 @@ mod tests {
         assert_eq!(
             parse_args(&[]).expect("args should parse"),
             CliAction::Repl {
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 allowed_tools: None,
                 permission_mode: PermissionMode::WorkspaceWrite,
                 base_commit: None,
@@ -14767,7 +14743,7 @@ mod tests {
             parse_args(&args).expect("args should parse"),
             CliAction::Prompt {
                 prompt: "hello world".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::WorkspaceWrite,
@@ -14880,7 +14856,7 @@ mod tests {
                 .expect("-- should terminate flag parsing"),
             CliAction::Prompt {
                 prompt: "-prompt-with-dash".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::WorkspaceWrite,
@@ -14896,7 +14872,7 @@ mod tests {
                 .expect("unknown dash-prefixed shorthand prompt should parse as prompt text"),
             CliAction::Prompt {
                 prompt: "-not-a-flag".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::WorkspaceWrite,
@@ -14912,7 +14888,7 @@ mod tests {
                 .expect("unknown double-dash text should stay eligible for prompt shorthand"),
             CliAction::Prompt {
                 prompt: "--bogus-flag-like literal".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::WorkspaceWrite,
@@ -14950,7 +14926,7 @@ mod tests {
             parsed,
             CliAction::Prompt {
                 prompt: "summarize this".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::WorkspaceWrite,
@@ -14965,7 +14941,7 @@ mod tests {
                 .expect("compact single-word prompt should parse"),
             CliAction::Prompt {
                 prompt: "hello".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::WorkspaceWrite,
@@ -15032,9 +15008,10 @@ mod tests {
     }
 
     #[test]
-    fn default_model_alias_uses_anthropic_routing_prefix() {
-        assert_eq!(DEFAULT_MODEL, "anthropic/claude-opus-4-7");
-        assert_eq!(resolve_model_alias("opus"), "anthropic/claude-opus-4-7");
+    fn default_model_defers_selection_to_the_local_daemon() {
+        // Startup must stay offline, so the default is an inert placeholder
+        // rather than a concrete model chosen at compile time.
+        assert_eq!(default_model(), api::OLLAMA_AUTO);
     }
 
     #[test]
@@ -15098,7 +15075,7 @@ mod tests {
         assert_eq!(
             parse_args(&args).expect("args should parse"),
             CliAction::Repl {
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 allowed_tools: None,
                 permission_mode: PermissionMode::ReadOnly,
                 base_commit: None,
@@ -15119,7 +15096,7 @@ mod tests {
         assert_eq!(
             parsed,
             CliAction::Repl {
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 allowed_tools: None,
                 permission_mode: PermissionMode::DangerFullAccess,
                 base_commit: None,
@@ -15147,7 +15124,7 @@ mod tests {
             parsed,
             CliAction::Prompt {
                 prompt: "do the thing".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::DangerFullAccess,
@@ -15171,7 +15148,7 @@ mod tests {
         assert_eq!(
             parse_args(&args).expect("args should parse"),
             CliAction::Repl {
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 allowed_tools: Some(
                     ["glob_search", "read_file", "write_file"]
                         .into_iter()
@@ -15257,7 +15234,7 @@ mod tests {
             CliAction::PrintSystemPrompt {
                 cwd: PathBuf::from("/tmp"),
                 date: "2026-04-01".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
             }
         );
@@ -15350,7 +15327,7 @@ mod tests {
             .expect("skills help overview should invoke"),
             CliAction::Prompt {
                 prompt: "$help overview".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: crate::default_permission_mode(),
@@ -16098,7 +16075,7 @@ mod tests {
         assert_eq!(
             parse_args(&["status".to_string()]).expect("status should parse"),
             CliAction::Status {
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 model_flag_raw: None, // #148: no --model flag passed
                 permission_mode: PermissionModeProvenance::default_fallback(),
                 output_format: CliOutputFormat::Text,
@@ -16129,60 +16106,39 @@ mod tests {
             !err_other.contains("--output-format json"),
             "unrelated args should not trigger --json hint: {err_other}"
         );
-        // #424: bare canonical GPT model ids should parse and route via provider
-        // detection instead of forcing the local-only `openai/` routing prefix.
-        match parse_args(&[
-            "prompt".to_string(),
-            "test".to_string(),
-            "--model".to_string(),
-            "gpt-4".to_string(),
-        ])
-        .expect("`--model gpt-4` should parse as a bare OpenAI model")
-        {
-            CliAction::Prompt { model, .. } => assert_eq!(model, "gpt-4"),
-            other => panic!("expected CliAction::Prompt, got: {other:?}"),
+        // Model names are Ollama tags now, so any well-formed name parses and
+        // the daemon is left to decide whether it actually serves it.
+        for model in ["gpt-4", "qwen-plus", "asdfgh", "qwen2.5-coder:7b"] {
+            match parse_args(&[
+                "prompt".to_string(),
+                "test".to_string(),
+                "--model".to_string(),
+                model.to_string(),
+            ])
+            .unwrap_or_else(|error| panic!("`--model {model}` should parse: {error}"))
+            {
+                CliAction::Prompt {
+                    model: parsed,
+                    ..
+                } => assert_eq!(parsed, model),
+                other => panic!("expected CliAction::Prompt, got: {other:?}"),
+            }
         }
-        let err_qwen = parse_args(&[
+
+        // A name that could never be an Ollama tag is still rejected.
+        let err_spaces = parse_args(&[
             "prompt".to_string(),
             "test".to_string(),
             "--model".to_string(),
-            "qwen-plus".to_string(),
+            "not a model".to_string(),
         ])
-        .expect_err("`--model qwen-plus` should fail with DashScope hint");
+        .expect_err("a model name with whitespace should fail");
         assert!(
-            err_qwen.contains("Did you mean `qwen/qwen-plus`?"),
-            "Qwen model error should hint qwen/ prefix: {err_qwen}"
-        );
-        assert!(
-            err_qwen.contains("DASHSCOPE_API_KEY"),
-            "Qwen model error should mention env var: {err_qwen}"
-        );
-        // Unrelated invalid model should NOT get a hint
-        let err_garbage = parse_args(&[
-            "prompt".to_string(),
-            "test".to_string(),
-            "--model".to_string(),
-            "asdfgh".to_string(),
-        ])
-        .expect_err("`--model asdfgh` should fail");
-        assert!(
-            !err_garbage.contains("Did you mean"),
-            "Unrelated model errors should not get a hint: {err_garbage}"
+            err_spaces.contains("invalid model syntax"),
+            "malformed model should be typed: {err_spaces}"
         );
 
         let original_openai_base_url = std::env::var_os("OPENAI_BASE_URL");
-        std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:11434/v1");
-        match parse_args(&[
-            "prompt".to_string(),
-            "test".to_string(),
-            "--model".to_string(),
-            "qwen2.5-coder:7b".to_string(),
-        ])
-        .expect("Ollama-style tag should parse when OPENAI_BASE_URL is set")
-        {
-            CliAction::Prompt { model, .. } => assert_eq!(model, "qwen2.5-coder:7b"),
-            other => panic!("expected CliAction::Prompt, got: {other:?}"),
-        }
         match parse_args(&[
             "prompt".to_string(),
             "test".to_string(),
@@ -16856,7 +16812,7 @@ mod tests {
             .expect("/skills help overview should invoke"),
             CliAction::Prompt {
                 prompt: "$help overview".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: crate::default_permission_mode(),
@@ -16883,7 +16839,7 @@ mod tests {
                 .expect("/skills /test should normalize to a single skill prompt prefix"),
             CliAction::Prompt {
                 prompt: "$test".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: crate::default_permission_mode(),
@@ -16896,7 +16852,7 @@ mod tests {
         assert_eq!(
             parse_args(&["/status".to_string()]).expect("/status should parse as local status"),
             CliAction::Status {
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 model_flag_raw: None,
                 permission_mode: PermissionModeProvenance::default_fallback(),
                 output_format: CliOutputFormat::Text,
@@ -17018,7 +16974,7 @@ mod tests {
             .expect("multi-word prompt should still parse"),
             CliAction::Prompt {
                 prompt: "hello world this is a prompt".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: crate::default_permission_mode(),
@@ -17037,7 +16993,7 @@ mod tests {
                 .expect("explicit prompt subcommand should allow literal typo word"),
             CliAction::Prompt {
                 prompt: "doctorr".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::WorkspaceWrite,
@@ -17066,7 +17022,7 @@ mod tests {
             result,
             CliAction::Prompt {
                 prompt: "PARITY_SCENARIO:bash_permission_prompt_approved".to_string(),
-                model: DEFAULT_MODEL.to_string(),
+                model: default_model().to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::WorkspaceWrite,
@@ -17363,21 +17319,16 @@ mod tests {
     }
 
     #[test]
-    fn format_connected_line_renders_anthropic_provider_for_claude_model() {
-        let model = "anthropic/claude-sonnet-4-6";
-
-        let line = format_connected_line(model);
-
-        assert_eq!(line, "Connected: anthropic/claude-sonnet-4-6 via anthropic");
-    }
-
-    #[test]
-    fn format_connected_line_renders_xai_provider_for_grok_model() {
-        let model = "grok-3";
-
-        let line = format_connected_line(model);
-
-        assert_eq!(line, "Connected: grok-3 via xai");
+    fn format_connected_line_always_reports_the_local_daemon() {
+        // Whatever the model is called, it is served locally.
+        assert_eq!(
+            format_connected_line("anthropic/claude-sonnet-4-6"),
+            "Connected: anthropic/claude-sonnet-4-6 via ollama"
+        );
+        assert_eq!(
+            format_connected_line("qwen3.5:9b"),
+            "Connected: qwen3.5:9b via ollama"
+        );
     }
 
     #[test]
@@ -17400,7 +17351,7 @@ mod tests {
         std::env::remove_var("ANTHROPIC_MODEL");
         std::env::set_var("ANTHROPIC_MODEL", "sonnet");
 
-        let resolved = with_current_dir(&root, || resolve_repl_model(DEFAULT_MODEL.to_string()))
+        let resolved = with_current_dir(&root, || resolve_repl_model(default_model().to_string()))
             .expect("env model should resolve");
 
         assert_eq!(resolved, "anthropic/claude-sonnet-4-6");
@@ -17420,10 +17371,10 @@ mod tests {
         std::env::set_var("CLAW_CONFIG_HOME", &config_home);
         std::env::remove_var("ANTHROPIC_MODEL");
 
-        let resolved = with_current_dir(&root, || resolve_repl_model(DEFAULT_MODEL.to_string()))
+        let resolved = with_current_dir(&root, || resolve_repl_model(default_model().to_string()))
             .expect("default model should resolve");
 
-        assert_eq!(resolved, DEFAULT_MODEL);
+        assert_eq!(resolved, default_model());
 
         std::env::remove_var("CLAW_CONFIG_HOME");
         fs::remove_dir_all(root).expect("cleanup temp dir");
@@ -19368,7 +19319,7 @@ UU conflicted.rs",
         let mut runtime = build_runtime_with_plugin_state(
             Session::new(),
             "runtime-plugin-lifecycle",
-            DEFAULT_MODEL.to_string(),
+            default_model().to_string(),
             vec!["test system prompt".to_string()],
             true,
             false,
@@ -19763,69 +19714,40 @@ mod alias_resolution_tests {
     }
 
     #[test]
-    fn test_alias_resolution_syntax_validation() {
-        let _guard = ollama_env_lock();
-        let _env = EnvVarGuard::unset("OLLAMA_HOST");
-        // Resolved aliases should pass syntax validation
-        let resolved = resolve_model_alias_with_config("opus");
-        assert!(validate_model_syntax(&resolved).is_ok());
-
-        // Raw aliases should FAIL syntax validation (this is why we resolve first!)
-        assert!(validate_model_syntax("opus").is_err());
+    fn model_syntax_accepts_any_ollama_tag() {
+        // The valid set is whatever the user has pulled, so syntax validation
+        // cannot reject unrecognised names — only malformed ones.
+        for model in [
+            "qwen3:8b",
+            "gemma4:e2b",
+            "qwen3.6:27b-nvfp4",
+            "some-model-nobody-has-heard-of",
+        ] {
+            assert!(
+                validate_model_syntax(model).is_ok(),
+                "{model} is a well-formed Ollama reference"
+            );
+        }
     }
 
     #[test]
-    fn test_unknown_alias_fails_validation() {
-        let _guard = ollama_env_lock();
-        let _env = EnvVarGuard::unset("OLLAMA_HOST");
-        // Unknown aliases resolve to themselves
-        let resolved = resolve_model_alias_with_config("unknown-alias");
-        assert_eq!(resolved, "unknown-alias");
-
-        // And then fail validation with a helpful error
-        let result = validate_model_syntax(&resolved);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("invalid model syntax"));
+    fn model_syntax_rejects_strings_that_cannot_name_a_model() {
+        for model in ["", "   ", "bogus model xyz"] {
+            let error =
+                validate_model_syntax(model).expect_err("{model} cannot name an Ollama model");
+            assert!(
+                error.contains("invalid model syntax"),
+                "error should be typed: {error}"
+            );
+        }
     }
 
     #[test]
-    fn qwen_invalid_model_hint_mentions_local_ollama_openai_base_url() {
-        let _guard = ollama_env_lock();
-        let _ollama_env = EnvVarGuard::unset("OLLAMA_HOST");
-        let _openai_env = EnvVarGuard::unset("OPENAI_BASE_URL");
-        let result = validate_model_syntax("qwen3:8b");
-
-        let error = result.expect_err("Ollama tag without local base URL should fail");
+    fn model_syntax_guidance_points_at_the_local_daemon() {
+        let error = validate_model_syntax("").expect_err("empty model should fail");
         assert!(
-            error.contains("Ollama"),
-            "Qwen Ollama tag error should mention Ollama: {error}"
+            error.contains("claw models"),
+            "guidance should tell the user how to discover real models: {error}"
         );
-        assert!(
-            error.contains("OPENAI_BASE_URL"),
-            "Qwen Ollama tag error should mention OPENAI_BASE_URL: {error}"
-        );
-        assert!(
-            error.contains("http://127.0.0.1:11434/v1"),
-            "Qwen Ollama tag error should show local Ollama OpenAI URL: {error}"
-        );
-    }
-
-    #[test]
-    fn test_direct_provider_model_passes() {
-        // Direct provider/model strings should remain unchanged and pass
-        let model = "openai/gpt-4o";
-        assert_eq!(resolve_model_alias_with_config(model), model);
-        assert!(validate_model_syntax(model).is_ok());
-    }
-    #[test]
-    fn test_ollama_host_bypasses_model_validation() {
-        let _guard = ollama_env_lock();
-        let _env = EnvVarGuard::set("OLLAMA_HOST", "http://127.0.0.1:11434");
-        // Ollama model names with colons pass
-        assert!(validate_model_syntax("qwen3:8b").is_ok());
-        assert!(validate_model_syntax("gemma4:e2b").is_ok());
-        assert!(validate_model_syntax("qwen3.6:27b-nvfp4").is_ok());
-        // Empty model still rejected
-        assert!(validate_model_syntax("").is_err());
     }
 }
