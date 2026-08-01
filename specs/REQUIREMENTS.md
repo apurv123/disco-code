@@ -243,20 +243,38 @@ Notes:
 
 ## 8. Known Issues Carried Forward
 
-### ISSUE-1: `effect/Context` resolution failure during binary compile
+### ISSUE-1: `effect/Context` resolution failure — ✅ RESOLVED (Checkpoint 1)
 
-- **Symptom**: `bun run script/build.ts --single` fails with
-  `error: Could not resolve: "effect/Context"` at
-  `@effect/platform-node-shared/dist/NodeStream.js:7:26`.
-- **Scope**: Vite build, typecheck and model snapshot all succeed; only `Bun.compile()` fails.
-  Reproduces with `--single`, so it is not a cross-compilation issue.
-- **Status**: Pre-existing, unrelated to provider removal. `effect` is declared as `"effect":
-"catalog:"`; suspected catalog-specifier or beta-package (`@effect/platform-node-shared@4.0.0-beta.47`)
-  resolution edge case in Bun 1.3.12.
-- **Untried fixes**: pin `effect` to a stable version, declare `effect` as an explicit dependency,
-  confirm reproduction on upstream `dev`.
-- **Resolution path**: the Rust-core migration removes the Bun binary compile step from the critical
-  path; until then this blocks TS binary releases only.
+- **Symptom**: `bun run script/build.ts --single` and ~115 test files failed with
+  `Cannot find module 'effect/Context'` from `@effect/platform-node-shared/dist/*.js`.
+- **Actual root cause**: a version skew, not a Bun or catalog bug. The catalog pins
+  `effect@4.0.0-beta.43`, in which the `Context` module was renamed to `ServiceMap`.
+  `@effect/platform-node@4.0.0-beta.43` declares `"@effect/platform-node-shared": "^4.0.0-beta.43"`,
+  and that caret range floated up to `beta.47`, which still imports `effect/Context`. So a
+  `beta.47` shared package was loaded against a `beta.43` core that no longer exported `Context`.
+- **Fix**: pin the transitive dependency in root `package.json`:
+  ```json
+  "overrides": { "@effect/platform-node-shared": "4.0.0-beta.43" }
+  ```
+  Stale `beta.47` directories under `node_modules/.bun` must be cleared for the pin to take effect.
+- **Impact of the fix**: the opencode suite went from 234 passing / 194 failing to
+  1569 passing / 18 failing, because ~115 test files had been failing at import time.
+- **Note**: when upgrading `effect`, bump `@effect/platform-node`, `@effect/platform-node-shared`
+  and `effect` together; the `Context`/`ServiceMap` rename makes mixed versions fail at runtime.
+
+### ISSUE-2: Windows-only test failures (pre-existing, unrelated)
+
+13 failures remain on Windows from environment constraints, not product code: symlink tests
+(`filesystem`, `Glob`, symlink handling) require developer mode/admin, plus `pty` websocket reuse,
+`cross-spawn` `.all` capture, `tool.bash` timeout termination, and formatter sequencing.
+
+### ISSUE-3: Stale cloud-provider tests
+
+5 failures remain in tests still asserting removed-provider behaviour
+(`plugin.auth-override` github-copilot, `session.llm.stream` OpenAI/Anthropic payloads,
+`session.message-v2.toModelMessage`, `session.prompt agent variant`). These are rewritten in
+Checkpoint 2 when the provider layer becomes Ollama-native. `test/provider/transform.test.ts`
+(2839 lines, exclusively removed cloud providers) was deleted in Checkpoint 1.
 
 ---
 
