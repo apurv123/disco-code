@@ -1,0 +1,65 @@
+Disco Code
+==========
+
+Disco Code is an open source, local-inference coding agent distributed under the
+MIT License. It is a derivative work combining two upstream MIT-licensed
+projects. This file records which parts of the tree derive from which upstream,
+so that license inheritance is auditable.
+
+Both upstreams are MIT licensed, and MIT permits derivative works and
+relicensing under the same terms provided the original copyright and permission
+notices are retained. Disco Code therefore remains MIT and reproduces both
+notices in LICENSE.
+
+
+Upstream 1: Claw Code
+---------------------
+Source:    https://github.com/ultraworkers/claw-code
+Version:   v0.1.3
+License:   MIT
+Copyright: (c) 2026 UltraWorkers and Claw Code contributors
+
+Derived components:
+
+    crates/api/              LLM transport layer and provider abstraction
+    crates/commands/         Slash-command surface
+    crates/compat-harness/   Compatibility test harness
+    crates/plugins/          Plugin discovery, hooks, lifecycle
+    crates/runtime/          Session, permissions, policy engine, MCP,
+                             sandbox, prompt construction, compaction
+    crates/telemetry/        Local telemetry primitives
+    crates/tools/            Built-in agent tool implementations
+    crates/rusty-claude-cli/ Terminal client
+    crates/claw-analog/      Config, doctor, agent surfaces
+    crates/claw-rag-service/ Local retrieval/embedding service
+
+The prompt-construction pipeline in crates/runtime/src/prompt.rs is inherited
+from Claw Code and is central to Disco Code's answer quality. It is retained and
+extended rather than replaced.
+
+
+Upstream 2: opencode
+--------------------
+Source:    https://github.com/anomalyco/opencode
+Version:   v1.18.10
+License:   MIT
+Copyright: (c) 2025 opencode
+
+Derived components are introduced in later phases and will be recorded here as
+they land, covering the user interface layer, session presentation, and
+supporting developer experience. opencode is TypeScript/SolidJS; Disco Code
+consumes its interface layer as the webview frontend of a Tauri shell while the
+Rust crates above remain the core.
+
+
+Deliberate exclusions
+---------------------
+Neither upstream's cloud-model integrations are inherited. Disco Code performs
+inference exclusively against a local Ollama daemon. Hosted-model providers,
+their credential/OAuth flows, and hosted billing or account infrastructure are
+removed rather than disabled, and an egress policy prevents cloud AI endpoints
+from being reached at runtime.
+
+This is a local-inference product, not an offline one. Network access for web
+search, web fetch, code search, and Model Context Protocol servers is expected
+and supported.
