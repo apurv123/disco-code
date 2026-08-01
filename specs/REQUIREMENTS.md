@@ -280,15 +280,32 @@ Checkpoint 2 when the provider layer becomes Ollama-native. `test/provider/trans
 
 ## 9. Phased Delivery Plan
 
-| Phase | Goal                                                                                              | Exit criteria                                                       |
-| ----- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| 0     | Consolidate specs; establish licensing/attribution (`LICENSE`, `NOTICE`, `THIRD-PARTY.md`)        | Docs merged, attribution complete                                   |
-| 1     | Decommission cloud packages (§6 REMOVE list) and residual cloud code (§5 outstanding items 1–4)   | Repo builds with no SaaS/infra packages; typecheck clean            |
-| 2     | Native Ollama client + model auto-detection; delete `openai-compatible` shim                       | App runs a session end-to-end against a locally pulled Ollama model |
-| 3     | Egress policy: allow web search / fetch / code search / MCP; hard-block cloud inference            | Policy unit-tested; Playwright MCP works                            |
-| 4     | Port the claw-code prompt-enhancement pipeline (§3.2)                                              | Enhancement is inspectable, toggleable, measurably improves output  |
-| 5     | Rust core migration: agent loop, sessions, tools, permissions behind the §7 API                    | Webview runs against the Rust core                                  |
-| 6     | Packaging: signed installers for Windows / macOS / Linux                                           | Installable artifact per platform from CI                           |
+| Phase | Goal                                                                                              | Exit criteria                                                       | Status |
+| ----- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ------ |
+| 0     | Consolidate specs; establish licensing/attribution (`LICENSE`, `NOTICE`, `THIRD-PARTY.md`)        | Docs merged, attribution complete                                   | specs done; NOTICE pending |
+| 1     | Decommission cloud packages (§6 REMOVE list) and residual cloud code (§5 outstanding items 1–4)   | Repo builds with no SaaS/infra packages; typecheck clean            | ✅ done |
+| 2     | Native Ollama client + model auto-detection; delete `openai-compatible` shim                       | App runs a session end-to-end against a locally pulled Ollama model | ✅ detection done |
+| 3     | Egress policy: allow web search / fetch / code search / MCP; hard-block cloud inference            | Policy unit-tested; Playwright MCP works                            | next |
+| 4     | Port the claw-code prompt-enhancement pipeline (§3.2)                                              | Enhancement is inspectable, toggleable, measurably improves output  | |
+| 5     | Rust core migration: agent loop, sessions, tools, permissions behind the §7 API                    | Webview runs against the Rust core                                  | |
+| 6     | Packaging: signed installers for Windows / macOS / Linux                                           | Installable artifact per platform from CI                           | |
+
+### Checkpoint 2 notes
+
+`src/provider/ollama.ts` is the single source of model truth. `ModelsDev.get()` no longer reads a
+baked catalog snapshot; it calls `Ollama.list()`, which queries `/api/tags` and then `/api/show` per
+model. Capabilities map as `tools → tool_call`, `vision → attachment` + image modality,
+`thinking → reasoning`; the context window is read from `<architecture>.context_length` with a
+fallback scan and an 8192 default. Cost is fixed at zero because local inference is free.
+
+Detection degrades to an empty provider (never throws) when the daemon is unreachable or when
+`/api/show` fails for an individual model, so onboarding can distinguish "no Ollama" from
+"no models". `OPENCODE_MODELS_PATH` still overrides for fixtures. The `models-snapshot.js`
+generation was removed from `script/build.ts`.
+
+The transport still uses `@ai-sdk/openai-compatible` against Ollama's `/v1` endpoint; replacing that
+shim with a first-party client is deferred until the Rust core (Phase 5), since the wire format is
+the same and the shim is now pointed exclusively at a hardcoded local Ollama base URL.
 
 Each phase is committed as a checkpoint to `apurv123/disco-code`.
 

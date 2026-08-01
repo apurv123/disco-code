@@ -1,9 +1,8 @@
-import { Global } from "../global"
 import z from "zod"
 import { Flag } from "../flag/flag"
 import { lazy } from "@/util/lazy"
 import { Filesystem } from "../util/filesystem"
-import path from "path"
+import { Ollama } from "./ollama"
 
 export namespace ModelsDev {
   export const Model = z.object({
@@ -72,24 +71,26 @@ export namespace ModelsDev {
 
   export type Provider = z.infer<typeof Provider>
 
-  const filepath = path.join(Global.Path.cache, "models.json")
-
+  /**
+   * Local model registry. Unlike upstream there is no remote catalog to sync:
+   * the only provider is Ollama, discovered live from the running daemon.
+   * OPENCODE_MODELS_PATH still overrides for tests and offline fixtures.
+   */
   export const Data = lazy(async () => {
-    const result = await Filesystem.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).catch(() => {})
-    if (result) return result
-    // @ts-ignore
-    const snapshot = await import("./models-snapshot.js")
-      .then((m) => m.snapshot as Record<string, unknown>)
-      .catch(() => undefined)
-    if (snapshot) return snapshot
-    return {}
+    const override = Flag.OPENCODE_MODELS_PATH
+    if (override) {
+      const result = await Filesystem.readJson(override).catch(() => undefined)
+      if (result) return result as Record<string, Provider>
+    }
+    const ollama = await Ollama.list()
+    return { [Ollama.ID]: ollama } as Record<string, Provider>
   })
 
   export async function get() {
-    const result = await Data()
-    return result as Record<string, Provider>
+    return await Data()
   }
 
+  /** Re-detects models; call after the user pulls or removes one. */
   export async function refresh(_force?: boolean) {
     ModelsDev.Data.reset()
   }
