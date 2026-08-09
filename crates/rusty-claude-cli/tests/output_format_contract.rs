@@ -6042,3 +6042,113 @@ fn resume_safe_interactive_only_hint_includes_resume_suggestion() {
         "/compact hint must suggest --resume (it is resume-safe and not a local direct action) (#829): hint={hint:?}"
     );
 }
+
+
+// --- CP-D: staged prompt-enhancement harness -------------------------------
+//
+// These are deliberately hermetic. `claw enhance` reports the triage decision
+// without contacting the daemon, so the harness's routing can be pinned in CI
+// on a machine with no Ollama installed at all.
+
+#[test]
+fn enhance_json_reports_triage_without_inference() {
+    let root = unique_temp_dir("enhance-json");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    let parsed = assert_json_command(
+        &root,
+        &["--output-format", "json", "enhance", "fix the typo in README.md"],
+    );
+
+    assert_eq!(parsed["kind"], "enhance");
+    assert_eq!(parsed["status"], "ok");
+    assert_eq!(
+        parsed["complexity"], "trivial",
+        "a named single-file typo fix must not earn a pipeline: {parsed}"
+    );
+
+    let stages: Vec<&str> = parsed["stages"]
+        .as_array()
+        .expect("stages array")
+        .iter()
+        .map(|s| s["stage"].as_str().expect("stage label"))
+        .collect();
+    assert_eq!(
+        stages,
+        vec!["execute"],
+        "trivial requests must stay a single turn: {parsed}"
+    );
+}
+
+#[test]
+fn enhance_escalates_vague_requests_to_the_full_pipeline() {
+    let root = unique_temp_dir("enhance-vague");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    let parsed = assert_json_command(
+        &root,
+        &["--output-format", "json", "enhance", "clean this up"],
+    );
+
+    let stages: Vec<&str> = parsed["stages"]
+        .as_array()
+        .expect("stages array")
+        .iter()
+        .map(|s| s["stage"].as_str().expect("stage label"))
+        .collect();
+    assert_eq!(
+        stages,
+        vec!["clarify", "plan", "harden", "execute", "verify"],
+        "an unresolved reference with no scope must be interviewed: {parsed}"
+    );
+}
+
+#[test]
+fn enhance_hardens_irreversible_work_without_interviewing_it() {
+    let root = unique_temp_dir("enhance-danger");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    let parsed = assert_json_command(
+        &root,
+        &[
+            "--output-format",
+            "json",
+            "enhance",
+            "delete the users table in migrations/003_users.sql",
+        ],
+    );
+
+    let stages: Vec<&str> = parsed["stages"]
+        .as_array()
+        .expect("stages array")
+        .iter()
+        .map(|s| s["stage"].as_str().expect("stage label"))
+        .collect();
+    assert!(
+        stages.contains(&"harden"),
+        "irreversible work must always be hardened: {parsed}"
+    );
+    assert!(
+        !stages.contains(&"clarify"),
+        "a precisely stated request is dangerous, not unclear; \
+         asking questions about it is friction: {parsed}"
+    );
+}
+
+#[test]
+fn enhance_text_mode_stays_plaintext() {
+    let root = unique_temp_dir("enhance-text");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    let output = run_claw(&root, &["enhance", "clean this up"], &[]);
+    assert!(output.status.success(), "enhance should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.trim_start().starts_with('{'),
+        "text mode must not emit JSON: {stdout}"
+    );
+    assert!(
+        stdout.contains("Complexity:"),
+        "text mode should report the triage decision: {stdout}"
+    );
+}

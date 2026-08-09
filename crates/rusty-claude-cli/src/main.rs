@@ -314,9 +314,22 @@ const CLI_OPTION_SUGGESTIONS: &[&str] = &[
     "-acp",
     "--print",
     "--compact",
+    "--enhance",
     "--base-commit",
     "-p",
 ];
+
+/// True when the prompt-enhancement harness should drive the turn.
+///
+/// Read from the environment rather than threaded through every `CliAction`
+/// variant: the flag sets the variable during argument parsing, which keeps a
+/// cross-cutting mode from touching a dozen unrelated call signatures.
+fn enhance_enabled() -> bool {
+    matches!(
+        std::env::var("DISCO_ENHANCE").ok().as_deref(),
+        Some("1" | "true" | "yes")
+    )
+}
 
 fn is_registered_cli_flag_token(value: &str) -> bool {
     let flag = value.split_once('=').map_or(value, |(flag, _)| flag);
@@ -1128,6 +1141,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             action,
             output_format,
         } => print_models(action.as_deref(), output_format)?,
+        CliAction::Enhance {
+            request,
+            output_format,
+        } => print_enhance_plan(&request, output_format),
         CliAction::Diff { output_format } => match output_format {
             CliOutputFormat::Text => {
                 println!("{}", render_diff_report()?);
@@ -1281,6 +1298,12 @@ enum CliAction {
     },
     HelpTopic {
         topic: LocalHelpTopic,
+        output_format: CliOutputFormat,
+    },
+    /// Show how the prompt-enhancement harness would handle a request, without
+    /// running any inference. Hermetic, so it is usable in tests and in CI.
+    Enhance {
+        request: String,
         output_format: CliOutputFormat,
     },
     // prompt-mode formatting is only supported for non-interactive runs
@@ -1608,6 +1631,14 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             }
             "--compact" => {
                 compact = true;
+                index += 1;
+            }
+            "--enhance" => {
+                std::env::set_var("DISCO_ENHANCE", "1");
+                index += 1;
+            }
+            "--no-enhance" => {
+                std::env::set_var("DISCO_ENHANCE", "0");
                 index += 1;
             }
             "--base-commit" => {
@@ -2070,8 +2101,20 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             "interactive_only: `claw ultraplan` is a slash command.\nStart `claw` and run `/ultraplan` inside the REPL."
                 .to_string(),
         ),
-        "model" | "models" => {
-            let tail = &rest[1..];
+        "enhance" => {
+            let request = rest[1..].join(" ");
+            if request.trim().is_empty() {
+                return Err(
+                    "missing_argument: `claw enhance` needs a request to inspect.\nUsage: claw enhance \"<request>\" [--output-format json]"
+                        .to_string(),
+                );
+            }
+            Ok(CliAction::Enhance {
+                request,
+                output_format,
+            })
+        }
+        "model" | "models" => {            let tail = &rest[1..];
             let action = tail.first().cloned();
             if tail.len() > 1 {
                 return Err(format!(
@@ -7860,12 +7903,111 @@ impl LiveCli {
         output_format: CliOutputFormat,
         compact: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if enhance_enabled() {
+            return self.run_enhanced_turn(input, output_format);
+        }
         match output_format {
             CliOutputFormat::Json if compact => self.run_prompt_compact_json(input),
             CliOutputFormat::Text if compact => self.run_prompt_compact(input),
             CliOutputFormat::Text => self.run_turn(input),
             CliOutputFormat::Json => self.run_prompt_json(input),
         }
+    }
+
+    /// Run a request through the prompt-enhancement harness.
+    ///
+    /// Each stage is a separate turn. That is the entire point: a small model
+    /// asked to clarify, plan, execute and check in one response does all four
+    /// badly, whereas the same model asked one narrow question at a time is
+    /// markedly more reliable.
+    fn run_enhanced_turn(
+        &mut self,
+        input: &str,
+        output_format: CliOutputFormat,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let prompt = runtime::enhance::EnhancedPrompt::new(input);
+        let mut carry: Vec<(runtime::enhance::Stage, String)> = Vec::new();
+        let mut transcript: Vec<serde_json::Value> = Vec::new();
+        let mut criteria: Vec<String> = Vec::new();
+        let mut final_text = String::new();
+        let mut halted: Option<&str> = None;
+
+        for stage in prompt.triage.stages.clone() {
+            let staged = prompt.render_stage(stage, &carry);
+
+            let (mut turn_runtime, hook_abort_monitor) = self.prepare_turn_runtime(false)?;
+            let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
+            let result = turn_runtime.run_turn(&staged, Some(&mut permission_prompter));
+            hook_abort_monitor.stop();
+            let summary = result?;
+            self.replace_runtime(turn_runtime)?;
+            let text = final_assistant_text(&summary);
+
+            transcript.push(json!({ "stage": stage.label(), "output": text }));
+            if output_format == CliOutputFormat::Text {
+                println!("── {} ──\n{}\n", stage.label(), text.trim());
+            }
+
+            match stage {
+                runtime::enhance::Stage::Clarify => {
+                    // Questions need a human. Guessing an answer here would
+                    // reintroduce exactly the ambiguity this stage exists to
+                    // remove, so the run stops and hands them back.
+                    if let runtime::enhance::ClarifyOutcome::Questions(questions) =
+                        runtime::enhance::parse_clarify(&text)
+                    {
+                        final_text = questions
+                            .iter()
+                            .enumerate()
+                            .map(|(i, q)| format!("{}. {q}", i + 1))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        halted = Some("awaiting_answers");
+                        break;
+                    }
+                }
+                runtime::enhance::Stage::Plan => {
+                    let plan = runtime::enhance::parse_plan(&text);
+                    criteria = plan.criteria.clone();
+                }
+                runtime::enhance::Stage::Verify => {
+                    let results = runtime::enhance::parse_verification(&text);
+                    if !runtime::enhance::verification_passed(&results) {
+                        halted = Some("verification_failed");
+                    }
+                }
+                runtime::enhance::Stage::Harden | runtime::enhance::Stage::Execute => {}
+            }
+
+            final_text = text.clone();
+            carry.push((stage, text));
+        }
+
+        self.persist_session()?;
+
+        if output_format == CliOutputFormat::Json {
+            println!(
+                "{}",
+                json!({
+                    "message": final_text,
+                    "enhanced": true,
+                    "model": self.model,
+                    "triage": {
+                        "complexity": prompt.triage.complexity.label(),
+                        "rationale": prompt.triage.rationale(),
+                        "stages": prompt.triage.stages.iter()
+                            .map(|s| s.label()).collect::<Vec<_>>(),
+                    },
+                    "criteria": criteria,
+                    "status": halted.unwrap_or("complete"),
+                    "stages": transcript,
+                })
+            );
+        } else if let Some(reason) = halted {
+            println!("[{reason}]");
+        }
+
+        Ok(())
     }
 
     fn run_prompt_compact(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -11751,8 +11893,55 @@ fn short_tool_id(id: &str) -> String {
     format!("{prefix}…")
 }
 
-fn build_system_prompt(model: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    Ok(load_system_prompt(
+/// Show the harness's plan for a request without spending a token on it.
+///
+/// Triage is deterministic, so this is exactly what a real run would do -
+/// which makes it both a debugging tool and the hermetic surface the contract
+/// tests exercise.
+fn print_enhance_plan(request: &str, output_format: CliOutputFormat) {
+    let prompt = runtime::enhance::EnhancedPrompt::new(request);
+    let triage = &prompt.triage;
+
+    match output_format {
+        CliOutputFormat::Json => {
+            println!(
+                "{}",
+                json!({
+                    "kind": "enhance",
+                    "action": "enhance",
+                    "status": "ok",
+                    "request": request,
+                    "complexity": triage.complexity.label(),
+                    "rationale": triage.rationale(),
+                    "signals": triage.signals.iter()
+                        .map(|s| s.label()).collect::<Vec<_>>(),
+                    "stages": triage.stages.iter()
+                        .map(|s| json!({
+                            "stage": s.label(),
+                            "directive": s.directive(),
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            );
+        }
+        CliOutputFormat::Text => {
+            println!("Request:    {request}");
+            println!("Complexity: {}", triage.complexity.label());
+            println!("Rationale:  {}", triage.rationale());
+            println!(
+                "Stages:     {}",
+                triage
+                    .stages
+                    .iter()
+                    .map(|s| s.label())
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            );
+        }
+    }
+}
+
+fn build_system_prompt(model: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {    Ok(load_system_prompt(
         env::current_dir()?,
         DEFAULT_DATE,
         env::consts::OS,
