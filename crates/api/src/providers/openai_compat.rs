@@ -18,10 +18,13 @@ use crate::types::{
 
 use super::{preflight_message_request, resolve_model_alias, Provider, ProviderFuture};
 
-pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
-pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-pub const DEFAULT_DASHSCOPE_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 const REQUEST_ID_HEADER: &str = "request-id";
+
+/// Stand-in for the credential the local daemon does not want.
+///
+/// Ollama ignores the Authorization header entirely, but the OpenAI wire format
+/// requires one to be present, so a fixed non-secret value is sent.
+const LOCAL_PLACEHOLDER_TOKEN: &str = "ollama";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
 const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(128);
@@ -33,24 +36,18 @@ pub struct OpenAiCompatConfig {
     pub api_key_env: &'static str,
     pub base_url_env: &'static str,
     pub default_base_url: &'static str,
-    /// Maximum request body size in bytes. Provider-specific limits:
-    /// - `DashScope`: 6MB (`6_291_456` bytes) - observed in dogfood testing
-    /// - `OpenAI`: 100MB (`104_857_600` bytes)
-    /// - `xAI`: 50MB (`52_428_800` bytes)
+    /// Maximum request body size in bytes.
+    ///
+    /// Hosted endpoints each imposed their own ceiling. The local daemon has no
+    /// documented limit, so this now guards against pathological requests
+    /// rather than enforcing a remote contract.
     pub max_request_body_bytes: usize,
 }
 
-const XAI_ENV_VARS: &[&str] = &["XAI_API_KEY"];
-const OPENAI_ENV_VARS: &[&str] = &["OPENAI_API_KEY"];
-const DASHSCOPE_ENV_VARS: &[&str] = &["DASHSCOPE_API_KEY"];
-
-// Provider-specific request body size limits in bytes
-const XAI_MAX_REQUEST_BODY_BYTES: usize = 52_428_800; // 50MB
-const OPENAI_MAX_REQUEST_BODY_BYTES: usize = 104_857_600; // 100MB
-const DASHSCOPE_MAX_REQUEST_BODY_BYTES: usize = 6_291_456; // 6MB (observed limit in dogfood)
-
 pub const OLLAMA_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "Ollama",
+    // The daemon takes no credential. This names the host variable so that
+    // diagnostics have something actionable to point at.
     api_key_env: "OLLAMA_HOST",
     base_url_env: "OLLAMA_HOST",
     default_base_url: "http://127.0.0.1:11434/v1",
@@ -58,51 +55,14 @@ pub const OLLAMA_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
 };
 
 impl OpenAiCompatConfig {
+    /// The credentials this endpoint needs.
+    ///
+    /// Always empty: the only endpoint is a local daemon that does not
+    /// authenticate. Kept so credential diagnostics keep compiling and report
+    /// "nothing required" rather than being deleted at every call site.
     #[must_use]
-    pub const fn xai() -> Self {
-        Self {
-            provider_name: "xAI",
-            api_key_env: "XAI_API_KEY",
-            base_url_env: "XAI_BASE_URL",
-            default_base_url: DEFAULT_XAI_BASE_URL,
-            max_request_body_bytes: XAI_MAX_REQUEST_BODY_BYTES,
-        }
-    }
-
-    #[must_use]
-    pub const fn openai() -> Self {
-        Self {
-            provider_name: "OpenAI",
-            api_key_env: "OPENAI_API_KEY",
-            base_url_env: "OPENAI_BASE_URL",
-            default_base_url: DEFAULT_OPENAI_BASE_URL,
-            max_request_body_bytes: OPENAI_MAX_REQUEST_BODY_BYTES,
-        }
-    }
-
-    /// Alibaba `DashScope` compatible-mode endpoint (Qwen family models).
-    /// Uses the OpenAI-compatible REST shape at /compatible-mode/v1.
-    /// Requested via Discord #clawcode-get-help: native Alibaba API for
-    /// higher rate limits than going through `OpenRouter`.
-    #[must_use]
-    pub const fn dashscope() -> Self {
-        Self {
-            provider_name: "DashScope",
-            api_key_env: "DASHSCOPE_API_KEY",
-            base_url_env: "DASHSCOPE_BASE_URL",
-            default_base_url: DEFAULT_DASHSCOPE_BASE_URL,
-            max_request_body_bytes: DASHSCOPE_MAX_REQUEST_BODY_BYTES,
-        }
-    }
-
-    #[must_use]
-    pub fn credential_env_vars(self) -> &'static [&'static str] {
-        match self.provider_name {
-            "xAI" => XAI_ENV_VARS,
-            "OpenAI" => OPENAI_ENV_VARS,
-            "DashScope" => DASHSCOPE_ENV_VARS,
-            _ => &[],
-        }
+    pub const fn credential_env_vars(self) -> &'static [&'static str] {
+        &[]
     }
 }
 
@@ -178,23 +138,17 @@ impl OpenAiCompatClient {
         }
     }
 
+    /// Builds a client from the environment.
+    ///
+    /// This once resolved a hosted provider's API key and failed when none was
+    /// present. The only endpoint now is a local daemon that does not
+    /// authenticate, so the fallible path is gone; the placeholder token exists
+    /// solely because the OpenAI wire format expects an Authorization header.
+    /// The `Result` is retained because call sites treat construction as
+    /// fallible and collapsing it would ripple further than it is worth.
     pub fn from_env(config: OpenAiCompatConfig) -> Result<Self, ApiError> {
         let base_url = read_base_url(config);
-        let api_key = match read_env_non_empty(config.api_key_env)? {
-            Some(api_key) => api_key,
-            None if config.provider_name == "OpenAI"
-                && is_local_openai_compatible_base_url(&base_url) =>
-            {
-                "local-dev-token".to_string()
-            }
-            None => {
-                return Err(ApiError::missing_credentials(
-                    config.provider_name,
-                    config.credential_env_vars(),
-                ));
-            }
-        };
-        Ok(Self::new(api_key, config).with_base_url(base_url))
+        Ok(Self::new(LOCAL_PLACEHOLDER_TOKEN, config).with_base_url(base_url))
     }
     /// Creates the Ollama client. Disco Code's only inference client.
     ///
@@ -206,7 +160,7 @@ impl OpenAiCompatClient {
     pub fn ollama() -> Option<Self> {
         Some(Self {
             http: ollama_http_client(),
-            api_key: "ollama".to_string(),
+            api_key: LOCAL_PLACEHOLDER_TOKEN.to_string(),
             config: OLLAMA_CONFIG,
             base_url: crate::ollama::base(),
             max_retries: OLLAMA_MAX_RETRIES,
@@ -995,20 +949,25 @@ struct ErrorBody {
 /// `top_p`, `frequency_penalty`, and `presence_penalty`. These are typically
 /// reasoning/chain-of-thought models with fixed sampling.
 /// Public for benchmarking and testing purposes.
+/// Whether the model reasons before answering.
+///
+/// The hosted o1/o3/o4 and grok-3-mini names are gone; these are the reasoning
+/// families actually distributed through Ollama. This now only drives
+/// diagnostics and prompt shaping — it no longer strips sampling parameters.
 #[must_use]
 pub fn is_reasoning_model(model: &str) -> bool {
     let lowered = model.to_ascii_lowercase();
-    // Strip any provider/ prefix for the check (e.g. qwen/qwen-qwq -> qwen-qwq)
+    // Strip any provider/ prefix and any :tag suffix
+    // (e.g. ollama/deepseek-r1:8b -> deepseek-r1).
     let canonical = lowered.rsplit('/').next().unwrap_or(lowered.as_str());
-    // OpenAI reasoning models
-    canonical.starts_with("o1")
-        || canonical.starts_with("o3")
-        || canonical.starts_with("o4")
-        // xAI reasoning: grok-3-mini always uses reasoning mode
-        || canonical == "grok-3-mini"
-        // Alibaba DashScope reasoning variants (QwQ + Qwen3-Thinking family)
-        || canonical.starts_with("qwen-qwq")
+    let canonical = canonical.split(':').next().unwrap_or(canonical);
+    canonical.starts_with("deepseek-r1")
         || canonical.starts_with("qwq")
+        || canonical.starts_with("magistral")
+        || canonical.starts_with("gpt-oss")
+        || canonical.starts_with("exaone-deep")
+        || canonical.starts_with("smallthinker")
+        || canonical.contains("reasoning")
         || canonical.contains("thinking")
 }
 
@@ -1227,21 +1186,24 @@ fn build_chat_completion_request_for_base_url(
     }
 
     // OpenAI-compatible tuning parameters — only included when explicitly set.
-    // Reasoning models (o1/o3/o4/grok-3-mini) reject these params with 400;
-    // silently strip them to avoid cryptic provider errors.
-    if !is_reasoning_model(&request.model) {
-        if let Some(temperature) = request.temperature {
-            payload["temperature"] = json!(temperature);
-        }
-        if let Some(top_p) = request.top_p {
-            payload["top_p"] = json!(top_p);
-        }
-        if let Some(frequency_penalty) = request.frequency_penalty {
-            payload["frequency_penalty"] = json!(frequency_penalty);
-        }
-        if let Some(presence_penalty) = request.presence_penalty {
-            payload["presence_penalty"] = json!(presence_penalty);
-        }
+    //
+    // The hosted o1/o3/o4 and grok-3-mini endpoints rejected these with a 400,
+    // so they used to be stripped for reasoning models. Ollama has no such
+    // rule: a live probe accepts `temperature` alongside `reasoning_effort`,
+    // and local reasoning models such as deepseek-r1 are explicitly documented
+    // as needing a non-default temperature. Stripping would quietly degrade
+    // output quality, so the parameters are always forwarded.
+    if let Some(temperature) = request.temperature {
+        payload["temperature"] = json!(temperature);
+    }
+    if let Some(top_p) = request.top_p {
+        payload["top_p"] = json!(top_p);
+    }
+    if let Some(frequency_penalty) = request.frequency_penalty {
+        payload["frequency_penalty"] = json!(frequency_penalty);
+    }
+    if let Some(presence_penalty) = request.presence_penalty {
+        payload["presence_penalty"] = json!(presence_penalty);
     }
     // stop is generally safe for all providers
     if let Some(stop) = &request.stop {
@@ -1536,8 +1498,15 @@ fn openai_tool_choice(tool_choice: &ToolChoice) -> Value {
     }
 }
 
-fn should_request_stream_usage(config: OpenAiCompatConfig) -> bool {
-    matches!(config.provider_name, "OpenAI")
+/// Whether to ask the endpoint to report token usage on streamed responses.
+///
+/// This was gated on the provider being OpenAI, since other hosted backends
+/// rejected the field. Confirmed against a live daemon: Ollama accepts
+/// `stream_options.include_usage` and emits a final chunk carrying real
+/// prompt/completion counts, so the agent gets accurate token accounting while
+/// streaming instead of nothing.
+const fn should_request_stream_usage(_config: OpenAiCompatConfig) -> bool {
+    true
 }
 
 fn normalize_response(
@@ -1881,10 +1850,9 @@ mod tests {
     use super::{
         build_chat_completion_request, chat_completions_endpoint, is_reasoning_model,
         model_requires_reasoning_content_in_history, normalize_finish_reason, normalize_response,
-        openai_tool_choice, parse_tool_arguments, OpenAiCompatClient, OpenAiCompatConfig,
+        openai_tool_choice, parse_tool_arguments, OpenAiCompatClient, OLLAMA_CONFIG,
         StreamState,
     };
-    use crate::error::ApiError;
     use crate::types::{
         ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
         InputContentBlock, InputMessage, MessageRequest, OutputContentBlock, StreamEvent,
@@ -1926,7 +1894,7 @@ mod tests {
                 stream: false,
                 ..Default::default()
             },
-            OpenAiCompatConfig::xai(),
+            OLLAMA_CONFIG,
         );
 
         assert_eq!(payload["messages"][0]["role"], json!("system"));
@@ -1968,7 +1936,7 @@ mod tests {
         let request = assistant_history_with_thinking_request("deepseek-reasoner");
 
         // When serializing for legacy deepseek-reasoner.
-        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let payload = build_chat_completion_request(&request, OLLAMA_CONFIG);
 
         // Then reasoning_content is omitted.
         let assistant = &payload["messages"][0];
@@ -1982,7 +1950,7 @@ mod tests {
         let request = assistant_history_with_thinking_request("openai/deepseek-v4-pro");
 
         // When serializing for DeepSeek V4 Pro.
-        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let payload = build_chat_completion_request(&request, OLLAMA_CONFIG);
 
         // Then reasoning_content is included on the assistant message.
         let assistant = &payload["messages"][0];
@@ -2007,7 +1975,7 @@ mod tests {
             ..Default::default()
         };
 
-        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let payload = build_chat_completion_request(&request, OLLAMA_CONFIG);
         let assistant = &payload["messages"][0];
 
         assert!(assistant.get("content").is_none());
@@ -2021,7 +1989,7 @@ mod tests {
         let request = assistant_history_with_thinking_request("deepseek-v4-flash");
 
         // When serializing for DeepSeek V4 Flash.
-        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let payload = build_chat_completion_request(&request, OLLAMA_CONFIG);
 
         // Then reasoning_content is included on the assistant message.
         let assistant = &payload["messages"][0];
@@ -2199,7 +2167,7 @@ mod tests {
                 reasoning_effort: Some("high".to_string()),
                 ..Default::default()
             },
-            OpenAiCompatConfig::openai(),
+            OLLAMA_CONFIG,
         );
         assert_eq!(payload["reasoning_effort"], json!("high"));
     }
@@ -2213,7 +2181,7 @@ mod tests {
                 messages: vec![InputMessage::user_text("hello")],
                 ..Default::default()
             },
-            OpenAiCompatConfig::openai(),
+            OLLAMA_CONFIG,
         );
         assert_eq!(payload["thinking"], json!({"type": "enabled"}));
         assert_eq!(payload["model"], json!("deepseek-v4-pro"));
@@ -2228,7 +2196,7 @@ mod tests {
                 extra_body,
                 ..Default::default()
             },
-            OpenAiCompatConfig::openai(),
+            OLLAMA_CONFIG,
         );
         assert_eq!(
             payload_with_override["thinking"],
@@ -2242,7 +2210,7 @@ mod tests {
                 messages: vec![InputMessage::user_text("hello")],
                 ..Default::default()
             },
-            OpenAiCompatConfig::openai(),
+            OLLAMA_CONFIG,
         );
         assert!(non_deepseek_payload.get("thinking").is_none());
     }
@@ -2256,7 +2224,7 @@ mod tests {
                 messages: vec![InputMessage::user_text("hello")],
                 ..Default::default()
             },
-            OpenAiCompatConfig::openai(),
+            OLLAMA_CONFIG,
         );
         assert!(payload.get("reasoning_effort").is_none());
     }
@@ -2274,29 +2242,10 @@ mod tests {
                 stream: true,
                 ..Default::default()
             },
-            OpenAiCompatConfig::openai(),
+            OLLAMA_CONFIG,
         );
 
         assert_eq!(payload["stream_options"], json!({"include_usage": true}));
-    }
-
-    #[test]
-    fn xai_streaming_requests_skip_openai_specific_usage_opt_in() {
-        let payload = build_chat_completion_request(
-            &MessageRequest {
-                model: "grok-3".to_string(),
-                max_tokens: 64,
-                messages: vec![InputMessage::user_text("hello")],
-                system: None,
-                tools: None,
-                tool_choice: None,
-                stream: true,
-                ..Default::default()
-            },
-            OpenAiCompatConfig::xai(),
-        );
-
-        assert!(payload.get("stream_options").is_none());
     }
 
     #[test]
@@ -2320,21 +2269,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_xai_api_key_is_provider_specific() {
-        let _lock = env_lock();
-        std::env::remove_var("XAI_API_KEY");
-        let error = OpenAiCompatClient::from_env(OpenAiCompatConfig::xai())
-            .expect_err("missing key should error");
-        assert!(matches!(
-            error,
-            ApiError::MissingCredentials {
-                provider: "xAI",
-                ..
-            }
-        ));
-    }
-
-    #[test]
     fn local_openai_base_url_does_not_require_api_key() {
         let _lock = env_lock();
         let original_base_url = std::env::var_os("OPENAI_BASE_URL");
@@ -2342,7 +2276,7 @@ mod tests {
         std::env::set_var("OPENAI_BASE_URL", "http://127.0.0.1:11434/v1");
         std::env::remove_var("OPENAI_API_KEY");
 
-        let client = OpenAiCompatClient::from_env(OpenAiCompatConfig::openai())
+        let client = OpenAiCompatClient::from_env(OLLAMA_CONFIG)
             .expect("local OpenAI-compatible endpoint should not require an API key");
         assert_eq!(client.base_url(), "http://127.0.0.1:11434/v1");
 
@@ -2424,7 +2358,7 @@ mod tests {
             reasoning_effort: None,
             extra_body: BTreeMap::new(),
         };
-        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let payload = build_chat_completion_request(&request, OLLAMA_CONFIG);
         assert_eq!(payload["temperature"], 0.7);
         assert_eq!(payload["top_p"], 0.9);
         assert_eq!(payload["frequency_penalty"], 0.5);
@@ -2452,7 +2386,7 @@ mod tests {
                 extra_body,
                 ..Default::default()
             },
-            OpenAiCompatConfig::openai(),
+            OLLAMA_CONFIG,
         );
 
         assert_eq!(payload["model"], json!("gpt-4o"));
@@ -2466,59 +2400,41 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_model_strips_tuning_params() {
+    fn local_reasoning_families_are_detected() {
+        // Reasoning models actually distributed through Ollama, including the
+        // `:tag` suffix form the daemon reports.
+        assert!(is_reasoning_model("deepseek-r1"));
+        assert!(is_reasoning_model("deepseek-r1:8b"));
+        assert!(is_reasoning_model("qwq:32b"));
+        assert!(is_reasoning_model("magistral:24b"));
+        assert!(is_reasoning_model("gpt-oss:20b"));
+        assert!(is_reasoning_model("qwen3-30b-a3b-thinking"));
+        assert!(is_reasoning_model("phi4-reasoning:plus"));
+        assert!(is_reasoning_model("ollama/deepseek-r1:8b"));
+        // Non-reasoning local models must not be classified as reasoning.
+        assert!(!is_reasoning_model("qwen3.5:9b"));
+        assert!(!is_reasoning_model("gemma4:e4b"));
+        assert!(!is_reasoning_model("llama3.3:70b"));
+    }
+
+    #[test]
+    fn tuning_params_are_forwarded_for_reasoning_models() {
+        // Hosted o-series endpoints rejected these; Ollama accepts them and
+        // local reasoning models need a tuned temperature, so they must not be
+        // stripped.
         let request = MessageRequest {
-            model: "o1-mini".to_string(),
+            model: "deepseek-r1:8b".to_string(),
             max_tokens: 1024,
-            messages: vec![],
-            stream: false,
-            temperature: Some(0.7),
-            top_p: Some(0.9),
-            frequency_penalty: Some(0.5),
-            presence_penalty: Some(0.3),
-            stop: Some(vec!["\n".to_string()]),
+            messages: vec![InputMessage::user_text("hi")],
+            temperature: Some(0.6),
+            top_p: Some(0.95),
             ..Default::default()
         };
-        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
-        assert!(
-            payload.get("temperature").is_none(),
-            "reasoning model should strip temperature"
-        );
-        assert!(
-            payload.get("top_p").is_none(),
-            "reasoning model should strip top_p"
-        );
-        assert!(payload.get("frequency_penalty").is_none());
-        assert!(payload.get("presence_penalty").is_none());
-        // stop is safe for all providers
-        assert_eq!(payload["stop"], json!(["\n"]));
-    }
 
-    #[test]
-    fn grok_3_mini_is_reasoning_model() {
-        assert!(is_reasoning_model("grok-3-mini"));
-        assert!(is_reasoning_model("o1"));
-        assert!(is_reasoning_model("o1-mini"));
-        assert!(is_reasoning_model("o3-mini"));
-        assert!(!is_reasoning_model("gpt-4o"));
-        assert!(!is_reasoning_model("grok-3"));
-        assert!(!is_reasoning_model("claude-sonnet-4-6"));
-    }
+        let payload = build_chat_completion_request(&request, OLLAMA_CONFIG);
 
-    #[test]
-    fn qwen_reasoning_variants_are_detected() {
-        // QwQ reasoning model
-        assert!(is_reasoning_model("qwen-qwq-32b"));
-        assert!(is_reasoning_model("qwen/qwen-qwq-32b"));
-        // Qwen3 thinking family
-        assert!(is_reasoning_model("qwen3-30b-a3b-thinking"));
-        assert!(is_reasoning_model("qwen/qwen3-30b-a3b-thinking"));
-        // Bare qwq
-        assert!(is_reasoning_model("qwq-plus"));
-        // Regular Qwen models must NOT be classified as reasoning
-        assert!(!is_reasoning_model("qwen-max"));
-        assert!(!is_reasoning_model("qwen/qwen-plus"));
-        assert!(!is_reasoning_model("qwen-turbo"));
+        assert_eq!(payload["temperature"], json!(0.6));
+        assert_eq!(payload["top_p"], json!(0.95));
     }
 
     #[test]
@@ -2530,7 +2446,7 @@ mod tests {
             stream: false,
             ..Default::default()
         };
-        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let payload = build_chat_completion_request(&request, OLLAMA_CONFIG);
         assert!(
             payload.get("temperature").is_none(),
             "temperature should be absent"
@@ -2552,7 +2468,7 @@ mod tests {
             stream: false,
             ..Default::default()
         };
-        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let payload = build_chat_completion_request(&request, OLLAMA_CONFIG);
         assert_eq!(
             payload["max_completion_tokens"],
             json!(512),
@@ -2615,7 +2531,7 @@ mod tests {
             stream: false,
             ..Default::default()
         };
-        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let payload = build_chat_completion_request(&request, OLLAMA_CONFIG);
         let messages = payload["messages"].as_array().unwrap();
         let assistant_msg = messages
             .iter()
@@ -2647,7 +2563,7 @@ mod tests {
             stream: false,
             ..Default::default()
         };
-        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let payload = build_chat_completion_request(&request, OLLAMA_CONFIG);
         let messages = payload["messages"].as_array().unwrap();
         let assistant_msg = messages
             .iter()
@@ -2715,7 +2631,7 @@ mod tests {
             stream: false,
             ..Default::default()
         };
-        let payload = build_chat_completion_request(&request, OpenAiCompatConfig::openai());
+        let payload = build_chat_completion_request(&request, OLLAMA_CONFIG);
         assert_eq!(payload["max_tokens"], json!(512));
         assert!(
             payload.get("max_completion_tokens").is_none(),
@@ -2879,7 +2795,7 @@ mod tests {
 
         // Non-kimi model: should have is_error field
         let request_gpt = make_request("gpt-4o");
-        let payload_gpt = build_chat_completion_request(&request_gpt, OpenAiCompatConfig::openai());
+        let payload_gpt = build_chat_completion_request(&request_gpt, OLLAMA_CONFIG);
         let messages_gpt = payload_gpt["messages"].as_array().unwrap();
         let tool_msg_gpt = messages_gpt.iter().find(|m| m["role"] == "tool").unwrap();
         assert!(
@@ -2890,7 +2806,7 @@ mod tests {
         // kimi model: should NOT have is_error field
         let request_kimi = make_request("kimi-k2.5");
         let payload_kimi =
-            build_chat_completion_request(&request_kimi, OpenAiCompatConfig::dashscope());
+            build_chat_completion_request(&request_kimi, OLLAMA_CONFIG);
         let messages_kimi = payload_kimi["messages"].as_array().unwrap();
         let tool_msg_kimi = messages_kimi.iter().find(|m| m["role"] == "tool").unwrap();
         assert!(
@@ -2919,7 +2835,7 @@ mod tests {
             ..Default::default()
         };
 
-        let size = super::estimate_request_body_size(&request, OpenAiCompatConfig::openai());
+        let size = super::estimate_request_body_size(&request, OLLAMA_CONFIG);
         // Should be non-zero and reasonable for a small request
         assert!(size > 0, "estimated size should be positive");
         assert!(size < 10_000, "small request should be under 10KB");
@@ -2936,39 +2852,9 @@ mod tests {
         };
 
         // Should pass for all providers with a small request
-        assert!(super::check_request_body_size(&request, OpenAiCompatConfig::openai()).is_ok());
-        assert!(super::check_request_body_size(&request, OpenAiCompatConfig::xai()).is_ok());
-        assert!(super::check_request_body_size(&request, OpenAiCompatConfig::dashscope()).is_ok());
-    }
-
-    #[test]
-    fn check_request_body_size_fails_for_dashscope_when_exceeds_6mb() {
-        // Create a request that exceeds DashScope's 6MB limit
-        let large_content = "x".repeat(7_000_000); // 7MB of content
-        let request = MessageRequest {
-            model: "qwen-plus".to_string(),
-            max_tokens: 100,
-            messages: vec![InputMessage::user_text(large_content)],
-            stream: false,
-            ..Default::default()
-        };
-
-        let result = super::check_request_body_size(&request, OpenAiCompatConfig::dashscope());
-        assert!(result.is_err(), "should fail for 7MB request to DashScope");
-
-        let err = result.unwrap_err();
-        match err {
-            crate::error::ApiError::RequestBodySizeExceeded {
-                estimated_bytes,
-                max_bytes,
-                provider,
-            } => {
-                assert_eq!(provider, "DashScope");
-                assert_eq!(max_bytes, 6_291_456); // 6MB limit
-                assert!(estimated_bytes > max_bytes);
-            }
-            _ => panic!("expected RequestBodySizeExceeded error, got {err:?}"),
-        }
+        assert!(super::check_request_body_size(&request, OLLAMA_CONFIG).is_ok());
+        assert!(super::check_request_body_size(&request, OLLAMA_CONFIG).is_ok());
+        assert!(super::check_request_body_size(&request, OLLAMA_CONFIG).is_ok());
     }
 
     #[test]
@@ -2976,15 +2862,15 @@ mod tests {
         assert_eq!(
             super::wire_model_for_base_url(
                 "openai/gpt-4o",
-                OpenAiCompatConfig::openai(),
-                super::DEFAULT_OPENAI_BASE_URL,
+                OLLAMA_CONFIG,
+                OLLAMA_CONFIG.default_base_url,
             ),
             Cow::Borrowed("gpt-4o")
         );
         assert_eq!(
             super::wire_model_for_base_url(
                 "openai/qwen2.5-coder:7b",
-                OpenAiCompatConfig::openai(),
+                OLLAMA_CONFIG,
                 "http://127.0.0.1:11434/v1",
             ),
             Cow::Borrowed("qwen2.5-coder:7b")
@@ -2992,7 +2878,7 @@ mod tests {
         assert_eq!(
             super::wire_model_for_base_url(
                 "openai/llama3.2",
-                OpenAiCompatConfig::openai(),
+                OLLAMA_CONFIG,
                 "http://localhost:11434/v1/chat/completions",
             ),
             Cow::Borrowed("llama3.2")
@@ -3000,7 +2886,7 @@ mod tests {
         assert_eq!(
             super::wire_model_for_base_url(
                 "openai/gpt-4.1-mini",
-                OpenAiCompatConfig::openai(),
+                OLLAMA_CONFIG,
                 "https://openrouter.ai/api/v1",
             ),
             Cow::Borrowed("openai/gpt-4.1-mini")
@@ -3008,7 +2894,7 @@ mod tests {
         assert_eq!(
             super::wire_model_for_base_url(
                 "openai/gpt-4.1-mini",
-                OpenAiCompatConfig::openai(),
+                OLLAMA_CONFIG,
                 "https://not-localhost.example.com/v1",
             ),
             Cow::Borrowed("openai/gpt-4.1-mini")
@@ -3024,50 +2910,11 @@ mod tests {
         assert_eq!(
             super::wire_model_for_base_url(
                 "local/Qwen/Qwen3.6-27B-FP8",
-                OpenAiCompatConfig::openai(),
+                OLLAMA_CONFIG,
                 "http://127.0.0.1:8000/v1",
             ),
             Cow::Borrowed("Qwen/Qwen3.6-27B-FP8")
         );
-    }
-
-    #[test]
-    fn check_request_body_size_allows_large_requests_for_openai() {
-        // Create a request that exceeds DashScope's limit but is under OpenAI's 100MB limit
-        let large_content = "x".repeat(10_000_000); // 10MB of content
-        let request = MessageRequest {
-            model: "gpt-4o".to_string(),
-            max_tokens: 100,
-            messages: vec![InputMessage::user_text(large_content)],
-            stream: false,
-            ..Default::default()
-        };
-
-        // Should pass for OpenAI (100MB limit)
-        assert!(
-            super::check_request_body_size(&request, OpenAiCompatConfig::openai()).is_ok(),
-            "10MB request should pass for OpenAI's 100MB limit"
-        );
-
-        // Should fail for DashScope (6MB limit)
-        assert!(
-            super::check_request_body_size(&request, OpenAiCompatConfig::dashscope()).is_err(),
-            "10MB request should fail for DashScope's 6MB limit"
-        );
-    }
-
-    #[test]
-    fn provider_specific_size_limits_are_correct() {
-        assert_eq!(
-            OpenAiCompatConfig::dashscope().max_request_body_bytes,
-            6_291_456
-        ); // 6MB
-        assert_eq!(
-            OpenAiCompatConfig::openai().max_request_body_bytes,
-            104_857_600
-        ); // 100MB
-        assert_eq!(OpenAiCompatConfig::xai().max_request_body_bytes, 52_428_800);
-        // 50MB
     }
 
     #[test]

@@ -1,42 +1,43 @@
-//! OpenAI-compatible embeddings HTTP client.
+//! Embeddings client for the local Ollama daemon.
+//!
+//! Ollama serves embeddings at the same OpenAI-compatible `/v1/embeddings`
+//! route, so the wire format is unchanged; what changed is where the request
+//! goes. This previously defaulted to `api.openai.com`, which meant indexing a
+//! repository shipped its source to a third party.
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
 pub struct EmbedConfig {
-    pub api_key: String,
     pub base_url: String,
     pub model: String,
 }
 
 impl EmbedConfig {
+    /// Reads the embedding endpoint from the environment.
+    ///
+    /// This is infallible in practice: the daemon needs no credential, so there
+    /// is nothing that can be missing. The `Result` is kept because callers
+    /// treat a misconfigured index as a recoverable condition.
     pub fn from_env() -> Result<Self, String> {
-        let api_key = std::env::var("CLAW_RAG_OPENAI_API_KEY")
-            .or_else(|_| std::env::var("OPENAI_API_KEY"))
-            .map_err(|_| {
-                "set CLAW_RAG_OPENAI_API_KEY or OPENAI_API_KEY for embeddings".to_string()
-            })?;
         let base_url = std::env::var("CLAW_RAG_EMBEDDING_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".into());
+            .unwrap_or_else(|_| api::ollama_base());
         let model = std::env::var("CLAW_RAG_EMBEDDING_MODEL")
-            .unwrap_or_else(|_| "text-embedding-3-small".into());
+            .unwrap_or_else(|_| "nomic-embed-text".into());
         Ok(Self {
-            api_key,
             base_url: base_url.trim_end_matches('/').to_string(),
             model,
         })
     }
 
-    /// Deterministic fake vectors for tests / dry-run (1536 dims match common `OpenAI` models;
-    /// truncated scan still works if dim mismatches — ingest uses same mock for all).
+    /// Deterministic fake vectors for tests / dry-run.
     #[must_use]
     pub fn mock_from_env() -> Option<Self> {
         if std::env::var("CLAW_RAG_MOCK_PROVIDERS").ok().as_deref() != Some("1") {
             return None;
         }
         Some(Self {
-            api_key: "mock".into(),
             base_url: "mock://".into(),
             model: "mock-embedding".into(),
         })
@@ -79,7 +80,6 @@ pub async fn embed_batch(
     };
     let res = client
         .post(&url)
-        .header("Authorization", format!("Bearer {}", cfg.api_key))
         .header("Content-Type", "application/json")
         .json(&body)
         .send()

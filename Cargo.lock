@@ -468,7 +468,6 @@ dependencies = [
  "clap_complete",
  "globset",
  "ignore",
- "mock-anthropic-service",
  "reqwest",
  "runtime",
  "serde",
@@ -483,6 +482,7 @@ dependencies = [
 name = "claw-rag-service"
 version = "0.1.0"
 dependencies = [
+ "api",
  "axum 0.8.9",
  "blake3",
  "clap",
@@ -1544,15 +1544,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mock-anthropic-service"
-version = "0.1.0"
-dependencies = [
- "api",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "nibble_vec"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2246,7 +2237,6 @@ dependencies = [
  "commands",
  "crossterm",
  "log",
- "mock-anthropic-service",
  "plugins",
  "pulldown-cmark",
  "runtime",

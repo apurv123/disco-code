@@ -23,7 +23,7 @@ fn every_model_name_routes_to_the_local_openai_compatible_surface() {
     for model in HOSTED_LOOKING {
         assert_eq!(
             api::detect_provider_kind(model),
-            ProviderKind::OpenAi,
+            ProviderKind::Ollama,
             "{model} must route to the local Ollama surface, not a hosted provider"
         );
     }
@@ -32,7 +32,7 @@ fn every_model_name_routes_to_the_local_openai_compatible_surface() {
 #[test]
 fn unknown_and_empty_model_names_still_route_locally() {
     for model in ["", "some-model-nobody-has-heard-of", "llama3.2:latest"] {
-        assert_eq!(api::detect_provider_kind(model), ProviderKind::OpenAi);
+        assert_eq!(api::detect_provider_kind(model), ProviderKind::Ollama);
     }
 }
 

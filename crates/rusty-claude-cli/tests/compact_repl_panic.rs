@@ -1,3 +1,11 @@
+//! REPL compaction must not spawn a nested tokio runtime.
+//!
+//! Driving the REPL requires a real PTY, which this harness gets via Python's
+//! `pty` module. That module is POSIX-only, so the test is gated to Unix
+//! rather than left to fail on Windows for reasons unrelated to the behaviour
+//! under test.
+#![cfg(unix)]
+
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -59,7 +67,7 @@ fn run_claw_repl(
     let mut child = command
         .current_dir(cwd)
         .env_clear()
-        .env("ANTHROPIC_API_KEY", "test-compact-repl-key")
+        .env("OLLAMA_HOST", "127.0.0.1:11434")
         .env("CLAW_CONFIG_HOME", config_home)
         .env("HOME", home)
         .env("NO_COLOR", "1")

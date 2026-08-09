@@ -1,5 +1,5 @@
-﻿use std::collections::HashMap;
-use std::ffi::OsString;
+use std::collections::HashMap;
+
 use std::sync::Arc;
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::Duration;
@@ -7,8 +7,8 @@ use std::time::Duration;
 use api::{
     build_http_client_with, ApiError, ContentBlockDelta, ContentBlockDeltaEvent,
     ContentBlockStartEvent, ContentBlockStopEvent, InputContentBlock, InputMessage,
-    MessageDeltaEvent, MessageRequest, OpenAiCompatClient, OpenAiCompatConfig, OutputContentBlock,
-    ProviderClient, ProxyConfig, StreamEvent, ToolChoice, ToolDefinition,
+    MessageDeltaEvent, MessageRequest, OpenAiCompatClient, OutputContentBlock, OLLAMA_CONFIG,
+    ProxyConfig, StreamEvent, ToolChoice, ToolDefinition,
 };
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -35,7 +35,7 @@ async fn send_message_uses_openai_compatible_endpoint_and_auth() {
     )
     .await;
 
-    let client = OpenAiCompatClient::new("xai-test-key", OpenAiCompatConfig::xai())
+    let client = OpenAiCompatClient::new("xai-test-key", OLLAMA_CONFIG)
         .with_base_url(server.base_url());
     let response = client
         .send_message(&sample_request(false))
@@ -87,7 +87,7 @@ async fn send_message_passes_optional_openai_compatible_parameters_on_wire() {
     )
     .await;
 
-    let client = OpenAiCompatClient::new("openai-test-key", OpenAiCompatConfig::openai())
+    let client = OpenAiCompatClient::new("openai-test-key", OLLAMA_CONFIG)
         .with_base_url(server.base_url());
     let response = client
         .send_message(&MessageRequest {
@@ -137,7 +137,7 @@ async fn send_message_preserves_deepseek_reasoning_content_before_text() {
     )
     .await;
 
-    let client = OpenAiCompatClient::new("openai-test-key", OpenAiCompatConfig::openai())
+    let client = OpenAiCompatClient::new("openai-test-key", OLLAMA_CONFIG)
         .with_base_url(server.base_url());
     let response = client
         .send_message(&MessageRequest {
@@ -186,7 +186,7 @@ async fn send_message_preserves_ollama_reasoning_before_text() {
     )
     .await;
 
-    let client = OpenAiCompatClient::new("ollama-test-key", OpenAiCompatConfig::openai())
+    let client = OpenAiCompatClient::new("ollama-test-key", OLLAMA_CONFIG)
         .with_base_url(server.base_url());
     let response = client
         .send_message(&MessageRequest {
@@ -243,7 +243,7 @@ async fn local_openai_gateway_strips_routing_prefix_and_preserves_extra_body_par
     extra_body.insert("parallel_tool_calls".to_string(), json!(false));
     extra_body.insert("model".to_string(), json!("malicious-override"));
 
-    let client = OpenAiCompatClient::new("openai-test-key", OpenAiCompatConfig::openai())
+    let client = OpenAiCompatClient::new("openai-test-key", OLLAMA_CONFIG)
         .with_base_url(server.base_url());
     let response = client
         .send_message(&MessageRequest {
@@ -277,7 +277,7 @@ async fn send_message_blocks_oversized_xai_requests_before_the_http_call() {
     )
     .await;
 
-    let client = OpenAiCompatClient::new("xai-test-key", OpenAiCompatConfig::xai())
+    let client = OpenAiCompatClient::new("xai-test-key", OLLAMA_CONFIG)
         .with_base_url(server.base_url());
     let error = client
         .send_message(&MessageRequest {
@@ -326,7 +326,7 @@ async fn send_message_accepts_full_chat_completions_endpoint_override() {
     .await;
 
     let endpoint_url = format!("{}/chat/completions", server.base_url());
-    let client = OpenAiCompatClient::new("xai-test-key", OpenAiCompatConfig::xai())
+    let client = OpenAiCompatClient::new("xai-test-key", OLLAMA_CONFIG)
         .with_base_url(endpoint_url);
     let response = client
         .send_message(&sample_request(false))
@@ -360,7 +360,7 @@ async fn stream_message_normalizes_text_and_multiple_tool_calls() {
     )
     .await;
 
-    let client = OpenAiCompatClient::new("xai-test-key", OpenAiCompatConfig::xai())
+    let client = OpenAiCompatClient::new("xai-test-key", OLLAMA_CONFIG)
         .with_base_url(server.base_url());
     let mut stream = client
         .stream_message(&sample_request(false))
@@ -457,7 +457,7 @@ async fn stream_message_preserves_ollama_reasoning_before_text() {
     )
     .await;
 
-    let client = OpenAiCompatClient::new("ollama-test-key", OpenAiCompatConfig::openai())
+    let client = OpenAiCompatClient::new("ollama-test-key", OLLAMA_CONFIG)
         .with_base_url(server.base_url());
     let mut stream = client
         .stream_message(&MessageRequest {
@@ -542,7 +542,7 @@ async fn stream_message_retries_retryable_sse_handshake_failures() {
     )
     .await;
 
-    let client = OpenAiCompatClient::new("openai-test-key", OpenAiCompatConfig::openai())
+    let client = OpenAiCompatClient::new("openai-test-key", OLLAMA_CONFIG)
         .with_base_url(server.base_url())
         .with_retry_policy(1, Duration::ZERO, Duration::ZERO);
     let mut stream = client
@@ -595,7 +595,7 @@ async fn openai_streaming_requests_opt_into_usage_chunks() {
     )
     .await;
 
-    let client = OpenAiCompatClient::new("openai-test-key", OpenAiCompatConfig::openai())
+    let client = OpenAiCompatClient::new("openai-test-key", OLLAMA_CONFIG)
         .with_base_url(server.base_url());
     let mut stream = client
         .stream_message(&sample_request(false))
@@ -669,7 +669,7 @@ async fn openai_compatible_client_honors_http_proxy_for_requests() {
     let proxied_http = build_http_client_with(&ProxyConfig::from_proxy_url(proxy.base_url()))
         .expect("proxy client should build");
 
-    let client = OpenAiCompatClient::new("openai-test-key", OpenAiCompatConfig::openai())
+    let client = OpenAiCompatClient::new("openai-test-key", OLLAMA_CONFIG)
         .with_http_client(proxied_http)
         .with_base_url("http://origin.invalid/v1");
     let response = client
@@ -854,24 +854,3 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-struct ScopedEnvVar {
-    key: &'static str,
-    previous: Option<OsString>,
-}
-
-impl ScopedEnvVar {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for ScopedEnvVar {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}

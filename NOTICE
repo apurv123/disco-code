@@ -60,6 +60,24 @@ their credential/OAuth flows, and hosted billing or account infrastructure are
 removed rather than disabled, and an egress policy prevents cloud AI endpoints
 from being reached at runtime.
 
+Specifically, the following Claw Code components are not carried forward:
+
+    crates/api/src/providers/anthropic.rs   Anthropic Messages API client
+    crates/mock-anthropic-service/          Mock Anthropic service used to
+                                            exercise the above
+    crates/api/tests/client_integration.rs  Anthropic wire-protocol test suite
+    rusty-claude-cli mock parity harness    Parity tests against the mock
+
+along with, inside retained files, the xAI/OpenAI/DashScope endpoint
+configurations and their credential handling, the hosted model registry and its
+aliases, the subscription-provider OAuth token flow, and the `/login`,
+`/logout`, and `/api-key` command surfaces. Remote MCP server authentication is
+unrelated to the above and is retained.
+
+The Claw Code retrieval service previously embedded repository contents through
+a hosted endpoint by default; it now embeds against the local daemon, so
+indexing a repository does not transmit source code.
+
 This is a local-inference product, not an offline one. Network access for web
 search, web fetch, code search, and Model Context Protocol servers is expected
 and supported.

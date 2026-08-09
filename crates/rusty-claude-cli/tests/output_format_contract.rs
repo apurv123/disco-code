@@ -108,7 +108,7 @@ fn assert_doctor_help_json_contract(parsed: &Value) {
     let statuses = parsed["status_values"].as_array().expect("status_values");
     assert!(statuses.iter().any(|status| status == "warn"));
     let checks = parsed["check_names"].as_array().expect("check_names");
-    assert!(checks.iter().any(|check| check == "auth"));
+    assert!(checks.iter().any(|check| check == "inference"));
     assert!(checks.iter().any(|check| check == "boot preflight"));
     assert!(checks.iter().any(|check| check == "memory"));
     assert!(checks.iter().any(|check| check == "mcp validation"));
@@ -773,20 +773,16 @@ fn status_json_accepts_namespaced_model_env_and_surfaces_alias_426() {
             config_home.to_str().expect("utf8 config home"),
         ),
         ("HOME", home.to_str().expect("utf8 home")),
-        ("CLAW_MODEL", "opus"),
+        ("CLAW_MODEL", "qwen35-oc:latest"),
         ("ANTHROPIC_MODEL", ""),
         ("ANTHROPIC_DEFAULT_MODEL", ""),
     ];
     let parsed = assert_json_command_with_env(&root, &["--output-format", "json", "status"], &envs);
 
     assert_eq!(parsed["status"], "ok");
-    assert_eq!(parsed["model"], "anthropic/claude-opus-4-7");
+    assert_eq!(parsed["model"], "qwen35-oc:latest");
     assert_eq!(parsed["model_source"], "env");
-    assert_eq!(parsed["model_raw"], "opus");
-    assert_eq!(
-        parsed["model_alias_resolved_to"],
-        "anthropic/claude-opus-4-7"
-    );
+    assert_eq!(parsed["model_raw"], "qwen35-oc:latest");
     assert_eq!(parsed["model_env_var"], "CLAW_MODEL");
 }
 
@@ -809,7 +805,7 @@ fn status_json_warns_on_invalid_model_env_426() {
         // Whitespace can never appear in an Ollama model name. A merely
         // unrecognised name is no longer invalid: the valid set is whatever the
         // user has pulled, which only the daemon can answer.
-        ("ANTHROPIC_MODEL", "bogus model xyz"),
+        ("OLLAMA_MODEL", "bogus model xyz"),
         ("ANTHROPIC_DEFAULT_MODEL", ""),
     ];
     let output = run_claw(&root, &["--output-format", "json", "status"], &envs);
@@ -829,7 +825,7 @@ fn status_json_warns_on_invalid_model_env_426() {
     assert!(
         parsed["model_validation_error"]
             .as_str()
-            .is_some_and(|message| message.contains("ANTHROPIC_MODEL")
+            .is_some_and(|message| message.contains("OLLAMA_MODEL")
                 && message.contains("bogus model xyz")),
         "warning should name env var and raw model: {parsed}"
     );
@@ -1498,8 +1494,8 @@ fn doctor_and_resume_status_emit_json_when_requested() {
     assert_eq!(
         check_names,
         vec![
-            "auth",
-            "base urls",
+            "inference",
+            "daemon address",
             "config",
             "mcp validation",
             "hook validation",
@@ -3665,8 +3661,8 @@ fn login_logout_removed_subcommands_have_error_kind_and_hint_765() {
             "claw {subcmd} must return non-null hint (#765), got: {hint:?}"
         );
         assert!(
-            hint.contains("ANTHROPIC_API_KEY") || hint.contains("ANTHROPIC_AUTH_TOKEN"),
-            "claw {subcmd} hint must mention the env var migration path, got: {hint:?}"
+            hint.contains("needs no login"),
+            "claw {subcmd} hint must explain that the local daemon needs no login, got: {hint:?}"
         );
     }
 }

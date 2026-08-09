@@ -29,5 +29,4 @@ walkdir = "2"
 ignore = "0.4"
 
 [dev-dependencies]
-mock-anthropic-service = { path = "../mock-anthropic-service" }
 tempfile = "3"

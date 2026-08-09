@@ -35,11 +35,10 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use log::debug;
 
 use api::{
-    detect_provider_kind, model_family_identity_for, resolve_startup_auth_source, AnthropicClient,
-    AuthSource, ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest,
-    MessageResponse, OutputContentBlock, PromptCache, ProviderClient as ApiProviderClient,
-    ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice, ToolDefinition,
-    ToolResultContentBlock,
+    detect_provider_kind, model_family_identity_for, ContentBlockDelta, InputContentBlock,
+    InputMessage, MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
+    ProviderClient as ApiProviderClient, ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice,
+    ToolDefinition, ToolResultContentBlock,
 };
 
 use commands::{
@@ -256,7 +255,7 @@ impl ModelProvenance {
 }
 
 fn env_model_for_runtime() -> Option<EnvModel> {
-    ["CLAW_MODEL", "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL"]
+    ["CLAW_MODEL", "OLLAMA_MODEL"]
         .into_iter()
         .find_map(|name| {
             env::var(name)
@@ -450,6 +449,8 @@ fn classify_error_kind(message: &str) -> &'static str {
     } else if message.starts_with("command_not_found:") {
         "command_not_found"
     } else if message.contains("missing Anthropic credentials") {
+        // Retained only so any stale on-disk session or transcript replaying an
+        // old error string still classifies instead of falling through.
         "missing_credentials"
     } else if message.contains("Manifest source files are missing")
         || message.starts_with("missing_manifests:")
@@ -643,15 +644,15 @@ fn invalid_output_format_value(message: &str) -> Option<String> {
 /// message is self-explanatory or no canonical remediation exists.
 fn fallback_hint_for_error_kind(kind: &str) -> Option<&'static str> {
     match kind {
-        "api_auth_error" => {
-            Some("Check that ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is set and valid.")
-        }
+        "api_auth_error" => Some(
+            "The local Ollama daemon does not authenticate, so this usually means OLLAMA_HOST points somewhere unexpected. Run `claw doctor`.",
+        ),
         "api_rate_limit_error" => {
             Some("You have hit the API rate limit. Wait and retry, or reduce request frequency.")
         }
-        "missing_credentials" => {
-            Some("Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN before running claw.")
-        }
+        "missing_credentials" => Some(
+            "Disco Code needs no credentials. Start the Ollama daemon instead, then run `claw models`.",
+        ),
         "config_parse_error" => Some(
             "Fix the JSON syntax or schema in the referenced .claw/settings.json or .claw.json file, then rerun the command.",
         ),
@@ -1541,7 +1542,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             "--model" => {
                 let value = args
                     .get(index + 1)
-                    .ok_or_else(|| "missing_flag_value: missing value for --model.\nUsage: --model <provider/model>  e.g. --model anthropic/claude-opus-4-7".to_string())?;
+                    .ok_or_else(|| "missing_flag_value: missing value for --model.\nUsage: --model <model-name>  e.g. --model qwen3.5:9b".to_string())?;
                 // #468: track duplicate --model flags
                 if model_flag_raw.is_some() {
                     push_duplicate_flag(&format!(
@@ -1968,8 +1969,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         // #145: `plugins` was routed through the prompt fallback because no
         // top-level parser arm produced CliAction::Plugins. That made `claw
         // plugins` (and `claw plugins --help`, `claw plugins list`, ...)
-        // attempt an Anthropic network call, surfacing the misleading error
-        // `missing Anthropic credentials` even though the command is purely
+        // attempt an inference call even though the command is purely
         // local introspection. Mirror `agents`/`mcp`/`skills`: action is the
         // first positional arg, target is the second.
         // `plugin` (singular) and `marketplace` are aliases for `plugins`.
@@ -2253,9 +2253,7 @@ Usage: claw prompt <text>  or  echo '<text>' | claw prompt".to_string());
             // #147: guard empty/whitespace-only prompts at the fallthrough
             // path the same way `"prompt"` arm above does. Without this,
             // `claw ""`, `claw "   "`, and `claw "" ""` silently route to
-            // the Anthropic call and surface a misleading
-            // `missing Anthropic credentials` error (or burn API tokens on
-            // an empty prompt when credentials are present).
+            // inference and spend a generation on an empty prompt.
             let joined = rest.join(" ");
             if joined.trim().is_empty() {
                 // #798: add \n hint so split_error_hint extracts it (was empty_prompt + null)
@@ -2537,7 +2535,7 @@ fn compact_interactive_only_error() -> String {
 fn removed_auth_surface_error(command_name: &str) -> String {
     // #765: two-line format so split_error_hint() extracts hint into JSON envelope
     format!(
-        "`claw {command_name}` has been removed.\nSet ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN instead."
+        "`claw {command_name}` has been removed.\nDisco Code runs against a local Ollama daemon and needs no login."
     )
 }
 
@@ -2908,18 +2906,19 @@ fn levenshtein_distance(left: &str, right: &str) -> usize {
     previous[right_chars.len()]
 }
 
+/// Expands the shorthand names a user may type for a model.
+///
+/// The built-in table mapped `opus`/`sonnet`/`haiku` onto hosted Claude
+/// releases and is gone with them. Ollama tags are the user's own, so the only
+/// aliases that can exist are the ones they define in config; this is now a
+/// pass-through that keeps the call sites and the config alias path intact.
 fn resolve_model_alias(model: &str) -> &str {
-    match model {
-        "opus" => "anthropic/claude-opus-4-7",
-        "sonnet" => "anthropic/claude-sonnet-4-6",
-        "haiku" => "anthropic/claude-haiku-4-5-20251213",
-        _ => model,
-    }
+    model
 }
 
-/// Resolve a model name through user-defined config aliases first, then fall
-/// back to the built-in alias table. This is the entry point used wherever a
-/// user-supplied model string is about to be dispatched to a provider.
+/// Resolve a model name through user-defined config aliases. Built-in aliases
+/// no longer exist, so this is the entry point wherever a user-supplied model
+/// string is about to be dispatched.
 fn resolve_model_alias_with_config(model: &str) -> String {
     let trimmed = model.trim();
     if let Some(resolved) = config_alias_for_current_dir(trimmed) {
@@ -2929,8 +2928,6 @@ fn resolve_model_alias_with_config(model: &str) -> String {
 }
 
 /// Validate model syntax at parse time.
-/// Accepts: known aliases (opus, sonnet, haiku) or provider/model pattern.
-/// Rejects: empty, whitespace-only, strings with spaces, or invalid chars.
 /// Checks that a model string is well-formed as an Ollama model reference.
 ///
 /// Ollama names models with a `name:tag` scheme — `qwen3.5:9b` — rather than the
@@ -2950,17 +2947,6 @@ fn validate_model_syntax(model: &str) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-fn is_bare_provider_model(model: &str) -> bool {
-    model.starts_with("claude-") || model.starts_with("gpt-")
-}
-
-fn is_local_openai_model_syntax(model: &str) -> bool {
-    if let Some(rest) = model.strip_prefix("local/") {
-        return !rest.is_empty() && rest.split('/').all(|segment| !segment.is_empty());
-    }
-    std::env::var_os("OPENAI_BASE_URL").is_some() && (model.contains(':') || model.contains('.'))
 }
 
 fn config_alias_for_current_dir(alias: &str) -> Option<String> {
@@ -3088,8 +3074,15 @@ fn config_model_for_current_dir() -> Option<String> {
     loader.load().ok()?.model().map(ToOwned::to_owned)
 }
 
+/// Decides which model a REPL or prompt run will use.
+///
+/// The `auto` placeholder is exchanged for a concrete model here rather than
+/// deeper inside the client, so that everything downstream — the system prompt,
+/// the session record, and the `model` field of `--output-format json` — names
+/// the model that actually served the request.
 fn resolve_repl_model(cli_model: String) -> Result<String, String> {
-    Ok(ModelProvenance::from_env_or_config_or_default(&cli_model)?.resolved)
+    let resolved = ModelProvenance::from_env_or_config_or_default(&cli_model)?.resolved;
+    Ok(api::resolve_model_alias(&resolved))
 }
 
 fn print_model_validation_warning_status(
@@ -3131,11 +3124,9 @@ fn print_model_validation_warning_status(
     Ok(())
 }
 
-fn provider_label(kind: ProviderKind) -> &'static str {
+const fn provider_label(kind: ProviderKind) -> &'static str {
     match kind {
-        ProviderKind::Anthropic => "anthropic",
-        ProviderKind::Xai => "xai",
-        ProviderKind::OpenAi => "openai",
+        ProviderKind::Ollama => "ollama",
     }
 }
 
@@ -3803,177 +3794,95 @@ fn run_mcp_serve() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
+/// Reports whether the local inference daemon is reachable and serving models.
+///
+/// This replaced a credential check. There are no credentials to inspect: the
+/// daemon is unauthenticated, so the question that actually blocks a prompt is
+/// not "is a key set" but "is Ollama running and does it have a model".
 fn check_auth_health() -> DiagnosticCheck {
-    let api_key_present = env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
-    let auth_token_present = env::var("ANTHROPIC_AUTH_TOKEN")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
-    let openai_key_present = env::var("OPENAI_API_KEY")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
-    let any_auth_present = api_key_present || auth_token_present || openai_key_present;
-    let prompt_ready = any_auth_present;
-    let env_details = format!(
-        "Environment       api_key={} auth_token={} openai_key={}",
-        if api_key_present { "present" } else { "absent" },
-        if auth_token_present {
-            "present"
+    let host = api::ollama_host();
+    let models = api::ollama_resolve();
+    let ready = models != api::OLLAMA_AUTO;
+    let env_details = format!("Daemon            {host}");
+
+    let mut data = Map::new();
+    data.insert("host".to_string(), json!(host));
+    data.insert("prompt_ready".to_string(), json!(ready));
+    data.insert(
+        "prompt_blocked_reason".to_string(),
+        if ready {
+            Value::Null
         } else {
-            "absent"
+            json!("daemon_unreachable")
         },
-        if openai_key_present {
-            "present"
-        } else {
-            "absent"
-        }
+    );
+    data.insert(
+        "resolved_model".to_string(),
+        if ready { json!(models) } else { Value::Null },
     );
 
-    match load_oauth_credentials() {
-        Ok(Some(token_set)) => DiagnosticCheck::new(
-            "Auth",
-            if any_auth_present {
-                DiagnosticLevel::Ok
-            } else {
-                DiagnosticLevel::Warn
-            },
-            if any_auth_present {
-                "supported auth env vars are configured; legacy saved OAuth is ignored"
-            } else {
-                "legacy saved OAuth credentials are present but unsupported"
-            },
+    if ready {
+        DiagnosticCheck::new(
+            "Inference",
+            DiagnosticLevel::Ok,
+            "the local Ollama daemon is reachable and serving at least one model",
+        )
+        .with_details(vec![env_details, format!("Selected model    {models}")])
+        .with_data(data)
+    } else {
+        DiagnosticCheck::new(
+            "Inference",
+            DiagnosticLevel::Warn,
+            "could not reach the local Ollama daemon",
         )
         .with_details(vec![
             env_details,
-            format!(
-                "Legacy OAuth      expires_at={} refresh_token={} scopes={}",
-                token_set
-                    .expires_at
-                    .map_or_else(|| "<none>".to_string(), |value| value.to_string()),
-                if token_set.refresh_token.is_some() {
-                    "present"
-                } else {
-                    "absent"
-                },
-                if token_set.scopes.is_empty() {
-                    "<none>".to_string()
-                } else {
-                    token_set.scopes.join(",")
-                }
-            ),
-            "Suggested action  set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN; `claw login` is removed"
-                .to_string(),
+            "Suggested action  start Ollama, then `ollama pull qwen3.5:9b`".to_string(),
         ])
-        .with_hint("Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN env var. The saved OAuth token is no longer accepted.")
-        .with_data(Map::from_iter([
-            ("api_key_present".to_string(), json!(api_key_present)),
-            ("auth_token_present".to_string(), json!(auth_token_present)),
-            ("openai_key_present".to_string(), json!(openai_key_present)),
-            ("prompt_ready".to_string(), json!(prompt_ready)),
-            ("prompt_blocked_reason".to_string(), if prompt_ready { Value::Null } else { json!("auth_missing") }),
-
-            ("legacy_saved_oauth_present".to_string(), json!(true)),
-            (
-                "legacy_saved_oauth_expires_at".to_string(),
-                json!(token_set.expires_at),
-            ),
-            (
-                "legacy_refresh_token_present".to_string(),
-                json!(token_set.refresh_token.is_some()),
-            ),
-            ("legacy_scopes".to_string(), json!(token_set.scopes)),
-        ])),
-        Ok(None) => DiagnosticCheck::new(
-            "Auth",
-            if any_auth_present {
-                DiagnosticLevel::Ok
-            } else {
-                DiagnosticLevel::Warn
-            },
-            if any_auth_present {
-                "supported auth env vars are configured"
-            } else {
-                "no supported auth env vars were found"
-            },
-        )
-        .with_details(vec![env_details])
-        .with_hint(if !any_auth_present { "Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN to authenticate." } else { "" })
-        .with_data(Map::from_iter([
-            ("api_key_present".to_string(), json!(api_key_present)),
-            ("auth_token_present".to_string(), json!(auth_token_present)),
-            ("openai_key_present".to_string(), json!(openai_key_present)),
-            ("prompt_ready".to_string(), json!(prompt_ready)),
-            ("prompt_blocked_reason".to_string(), if prompt_ready { Value::Null } else { json!("auth_missing") }),
-            ("legacy_saved_oauth_present".to_string(), json!(false)),
-            ("legacy_saved_oauth_expires_at".to_string(), Value::Null),
-            ("legacy_refresh_token_present".to_string(), json!(false)),
-            ("legacy_scopes".to_string(), json!(Vec::<String>::new())),
-        ])),
-        Err(error) => DiagnosticCheck::new(
-            "Auth",
-            DiagnosticLevel::Fail,
-            format!("failed to inspect legacy saved credentials: {error}"),
-        )
-        .with_hint("Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN env var to authenticate.")
-        .with_data(Map::from_iter([
-            ("api_key_present".to_string(), json!(api_key_present)),
-            ("auth_token_present".to_string(), json!(auth_token_present)),
-            ("openai_key_present".to_string(), json!(openai_key_present)),
-            ("prompt_ready".to_string(), json!(prompt_ready)),
-            ("prompt_blocked_reason".to_string(), if prompt_ready { Value::Null } else { json!("auth_missing") }),
-            ("legacy_saved_oauth_present".to_string(), Value::Null),
-            ("legacy_saved_oauth_expires_at".to_string(), Value::Null),
-            ("legacy_refresh_token_present".to_string(), Value::Null),
-            ("legacy_scopes".to_string(), Value::Null),
-            ("legacy_saved_oauth_error".to_string(), json!(error.to_string())),
-        ])),
+        .with_hint("Start the Ollama daemon and pull at least one model. Set OLLAMA_HOST if it does not listen on 127.0.0.1:11434.")
+        .with_data(data)
     }
 }
 
-/// #466: validate provider BASE_URL env vars
+/// Validates `OLLAMA_HOST` when the user has overridden it.
 fn check_base_url_health() -> DiagnosticCheck {
-    let base_url_vars = [
-        ("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
-        ("OPENAI_BASE_URL", "https://api.openai.com"),
-        ("XAI_BASE_URL", "https://api.x.ai"),
-        ("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com"),
-    ];
-    let mut issues: Vec<String> = Vec::new();
-    let mut details: Vec<String> = Vec::new();
-    for (var_name, default_url) in &base_url_vars {
-        if let Ok(value) = env::var(var_name) {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                issues.push(format!("{var_name} is empty"));
-                details.push(format!(
-                    "{var_name}  empty (will use default: {default_url})"
-                ));
-            } else if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
-                issues.push(format!("{var_name}={trimmed} is not a valid HTTP(S) URL"));
-                details.push(format!("{var_name}  invalid ({trimmed})"));
-            } else {
-                details.push(format!("{var_name}  {trimmed}"));
-            }
-        }
-    }
-    if issues.is_empty() {
-        DiagnosticCheck::new(
-            "Base URLs",
+    let Ok(raw) = env::var("OLLAMA_HOST") else {
+        return DiagnosticCheck::new(
+            "Daemon address",
             DiagnosticLevel::Ok,
-            "provider base URL env vars are valid or unset",
+            "OLLAMA_HOST is unset; the default daemon address will be used",
         )
-        .with_details(details)
-    } else {
-        DiagnosticCheck::new(
-            "Base URLs",
+        .with_details(vec![format!(
+            "OLLAMA_HOST       <unset> (will use {})",
+            api::OLLAMA_DEFAULT_HOST
+        )]);
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return DiagnosticCheck::new(
+            "Daemon address",
             DiagnosticLevel::Warn,
-            format!("{} base URL issue(s) found", issues.len()),
+            "OLLAMA_HOST is set but empty",
         )
-        .with_details(details)
-        .with_hint("Fix the reported BASE_URL env vars or unset them to use provider defaults.")
+        .with_details(vec![format!(
+            "OLLAMA_HOST       empty (will use {})",
+            api::OLLAMA_DEFAULT_HOST
+        )])
+        .with_hint("Unset OLLAMA_HOST or give it a value such as 127.0.0.1:11434.");
     }
+
+    // Ollama's own convention is a scheme-less `host:port`, so a missing scheme
+    // is normal rather than an error; it is normalised before use.
+    DiagnosticCheck::new(
+        "Daemon address",
+        DiagnosticLevel::Ok,
+        "OLLAMA_HOST is set",
+    )
+    .with_details(vec![
+        format!("OLLAMA_HOST       {trimmed}"),
+        format!("Resolved          {}", api::ollama_host()),
+    ])
 }
 
 fn check_config_health(
@@ -10324,17 +10233,13 @@ fn print_models(
                     "action": "list",
                     "status": "ok",
                     "default_model": default_model(),
-                    "aliases": [
-                        {"name": "opus", "model": resolve_model_alias("opus")},
-                        {"name": "sonnet", "model": resolve_model_alias("sonnet")},
-                        {"name": "haiku", "model": resolve_model_alias("haiku")}
-                    ],
+                    "installed_models": api::ollama_tags_blocking().unwrap_or_default(),
                     "configured_model": configured_model,
                     "resolved_configured_model": resolved_config_model,
                     "local_only": true,
                     "requires_credentials": false,
                     "requires_provider_request": false,
-                    "message": "Use --model <provider/model> or configure a model in claw settings."
+                    "message": "Use --model <name> with any model Ollama has pulled, or configure one in claw settings."
                 }))?
             );
         }
@@ -10404,7 +10309,7 @@ fn render_doctor_help_json() -> serde_json::Value {
         "requires_session_resume": false,
         "mutates_workspace": false,
         "output_fields": ["kind", "action", "status", "message", "report", "has_failures", "summary", "checks", "allowed_tools"],
-        "check_names": ["auth", "config", "mcp validation", "hook validation", "install source", "workspace", "memory", "boot preflight", "sandbox", "permissions", "system"],
+        "check_names": ["inference", "daemon address", "config", "mcp validation", "hook validation", "install source", "workspace", "memory", "boot preflight", "sandbox", "permissions", "system"],
         "status_values": ["ok", "warn", "fail"],
         "options": [
             {
@@ -12535,48 +12440,19 @@ impl AnthropicRuntimeClient {
         // `ProviderClient`) is an enum over Anthropic / xAI / OpenAI
         // variants, where xAI and OpenAI both use the OpenAI-compat
         // wire format under the hood. We consult
-        // `detect_provider_kind(&resolved_model)` so model-name prefix
-        // routing (`openai/`, `gpt-`, `grok`, `qwen/`) wins over
-        // env-var presence.
+        // Inference always goes to the local daemon, so there is no provider to
+        // select and no credentials to resolve.
         //
-        // For Anthropic we build the client directly instead of going
-        // through `ApiProviderClient::from_model_with_anthropic_auth`
-        // so we can explicitly apply `api::read_base_url()` — that
-        // reads `ANTHROPIC_BASE_URL` and is required for the local
-        // mock-server test harness
-        // (`crates/rusty-claude-cli/tests/compact_output.rs`) to point
-        // claw at its fake Anthropic endpoint. We also attach a
-        // session-scoped prompt cache on the Anthropic path; the
-        // prompt cache is Anthropic-only so non-Anthropic variants
-        // skip it.
+        // The *resolved* name is stored rather than the requested one, so that
+        // `--model auto` reports the model that actually served the request
+        // instead of the `ollama/auto` placeholder.
         let resolved_model = api::resolve_model_alias(&model);
-        let client = match detect_provider_kind(&resolved_model) {
-            ProviderKind::Anthropic => {
-                let auth = resolve_cli_auth_source()?;
-                let inner = AnthropicClient::from_auth(auth)
-                    .with_base_url(api::read_base_url())
-                    .with_prompt_cache(PromptCache::new(session_id));
-                ApiProviderClient::Anthropic(inner)
-            }
-            ProviderKind::Xai | ProviderKind::OpenAi => {
-                // The api crate's `ProviderClient::from_model_with_anthropic_auth`
-                // with `None` for the anthropic auth routes via
-                // `detect_provider_kind` and builds an
-                // `OpenAiCompatClient::from_env` with the matching
-                // `OpenAiCompatConfig` (openai / xai / dashscope).
-                // That reads the correct API-key env var and BASE_URL
-                // override internally, so this one call covers OpenAI,
-                // OpenRouter, xAI, DashScope, Ollama, and any other
-                // OpenAI-compat endpoint users configure via
-                // `OPENAI_BASE_URL` / `XAI_BASE_URL` / `DASHSCOPE_BASE_URL`.
-                ApiProviderClient::from_model_with_anthropic_auth(&resolved_model, None)?
-            }
-        };
+        let client = ApiProviderClient::from_model(&resolved_model)?;
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
             client,
             session_id: session_id.to_string(),
-            model,
+            model: resolved_model,
             enable_tools,
             emit_output,
             allowed_tools,
@@ -12589,15 +12465,6 @@ impl AnthropicRuntimeClient {
     fn set_reasoning_effort(&mut self, effort: Option<String>) {
         self.reasoning_effort = effort;
     }
-}
-
-fn resolve_cli_auth_source() -> Result<AuthSource, Box<dyn std::error::Error>> {
-    Ok(resolve_cli_auth_source_for_cwd()?)
-}
-
-#[allow(clippy::result_large_err)]
-fn resolve_cli_auth_source_for_cwd() -> Result<AuthSource, api::ApiError> {
-    resolve_startup_auth_source(|| Ok(None))
 }
 
 impl ApiClient for AnthropicRuntimeClient {
@@ -14690,47 +14557,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_cli_auth_source_ignores_saved_oauth_credentials() {
-        let _guard = env_lock();
-        let config_home = temp_dir();
-        std::fs::create_dir_all(&config_home).expect("config home should exist");
-
-        let original_config_home = std::env::var("CLAW_CONFIG_HOME").ok();
-        let original_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-        let original_auth_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok();
-        std::env::set_var("CLAW_CONFIG_HOME", &config_home);
-        std::env::remove_var("ANTHROPIC_API_KEY");
-        std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
-
-        save_oauth_credentials(&runtime::OAuthTokenSet {
-            access_token: "expired-access-token".to_string(),
-            refresh_token: Some("refresh-token".to_string()),
-            expires_at: Some(0),
-            scopes: vec!["org:create_api_key".to_string(), "user:profile".to_string()],
-        })
-        .expect("save expired oauth credentials");
-
-        let error = super::resolve_cli_auth_source_for_cwd()
-            .expect_err("saved oauth should be ignored without env auth");
-
-        match original_config_home {
-            Some(value) => std::env::set_var("CLAW_CONFIG_HOME", value),
-            None => std::env::remove_var("CLAW_CONFIG_HOME"),
-        }
-        match original_api_key {
-            Some(value) => std::env::set_var("ANTHROPIC_API_KEY", value),
-            None => std::env::remove_var("ANTHROPIC_API_KEY"),
-        }
-        match original_auth_token {
-            Some(value) => std::env::set_var("ANTHROPIC_AUTH_TOKEN", value),
-            None => std::env::remove_var("ANTHROPIC_AUTH_TOKEN"),
-        }
-        std::fs::remove_dir_all(config_home).expect("temp config home should clean up");
-
-        assert!(error.to_string().contains("ANTHROPIC_API_KEY"));
-    }
-
-    #[test]
     fn parses_prompt_subcommand() {
         let _guard = env_lock();
         std::env::remove_var("RUSTY_CLAUDE_PERMISSION_MODE");
@@ -14834,7 +14660,7 @@ mod tests {
             parse_args(&args).expect("args should parse"),
             CliAction::Prompt {
                 prompt: "explain this".to_string(),
-                model: "anthropic/claude-opus-4-7".to_string(),
+                model: "opus".to_string(),
                 output_format: CliOutputFormat::Json,
                 allowed_tools: None,
                 permission_mode: PermissionMode::WorkspaceWrite,
@@ -14984,7 +14810,7 @@ mod tests {
             parse_args(&args).expect("args should parse"),
             CliAction::Prompt {
                 prompt: "explain this".to_string(),
-                model: "anthropic/claude-opus-4-7".to_string(),
+                model: "opus".to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::WorkspaceWrite,
@@ -14997,14 +14823,12 @@ mod tests {
     }
 
     #[test]
-    fn resolves_known_model_aliases() {
-        assert_eq!(resolve_model_alias("opus"), "anthropic/claude-opus-4-7");
-        assert_eq!(resolve_model_alias("sonnet"), "anthropic/claude-sonnet-4-6");
-        assert_eq!(
-            resolve_model_alias("haiku"),
-            "anthropic/claude-haiku-4-5-20251213"
-        );
-        assert_eq!(resolve_model_alias("claude-opus"), "claude-opus");
+    fn model_names_pass_through_without_a_builtin_alias_table() {
+        // The opus/sonnet/haiku table is gone: Ollama model names are the only
+        // vocabulary, and unrecognised names go to the daemon untouched.
+        assert_eq!(resolve_model_alias("qwen35-oc:latest"), "qwen35-oc:latest");
+        assert_eq!(resolve_model_alias("gemma4:e4b"), "gemma4:e4b");
+        assert_eq!(resolve_model_alias("opus"), "opus");
     }
 
     #[test]
@@ -15025,7 +14849,7 @@ mod tests {
         std::fs::create_dir_all(&config_home).expect("config home should exist");
         std::fs::write(
             cwd.join(".claw").join("settings.json"),
-            r#"{"aliases":{"fast":"anthropic/claude-haiku-4-5-20251213","smart":"opus","cheap":"grok-3-mini"}}"#,
+            r#"{"aliases":{"fast":"gemma4:e4b","smart":"qwen35-oc:latest"}}"#,
         )
         .expect("project config should write");
 
@@ -15035,9 +14859,7 @@ mod tests {
         // when
         let direct = with_current_dir(&cwd, || resolve_model_alias_with_config("fast"));
         let chained = with_current_dir(&cwd, || resolve_model_alias_with_config("smart"));
-        let cross_provider = with_current_dir(&cwd, || resolve_model_alias_with_config("cheap"));
         let unknown = with_current_dir(&cwd, || resolve_model_alias_with_config("unknown-model"));
-        let builtin = with_current_dir(&cwd, || resolve_model_alias_with_config("haiku"));
 
         match original_config_home {
             Some(value) => std::env::set_var("CLAW_CONFIG_HOME", value),
@@ -15046,11 +14868,11 @@ mod tests {
         std::fs::remove_dir_all(root).expect("temp config root should clean up");
 
         // then
-        assert_eq!(direct, "anthropic/claude-haiku-4-5-20251213");
-        assert_eq!(chained, "anthropic/claude-opus-4-7");
-        assert_eq!(cross_provider, "grok-3-mini");
+        assert_eq!(direct, "gemma4:e4b");
+        assert_eq!(chained, "qwen35-oc:latest");
+        // Anything the user has not aliased is passed to the daemon verbatim;
+        // there is no built-in alias table any more.
         assert_eq!(unknown, "unknown-model");
-        assert_eq!(builtin, "anthropic/claude-haiku-4-5-20251213");
     }
 
     #[test]
@@ -15264,9 +15086,9 @@ mod tests {
     #[test]
     fn removed_login_and_logout_subcommands_error_helpfully() {
         let login = parse_args(&["login".to_string()]).expect_err("login should be removed");
-        assert!(login.contains("ANTHROPIC_API_KEY"));
+        assert!(login.contains("needs no login"));
         let logout = parse_args(&["logout".to_string()]).expect_err("logout should be removed");
-        assert!(logout.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(logout.contains("needs no login"));
         assert_eq!(
             parse_args(&["doctor".to_string()]).expect("doctor should parse"),
             CliAction::Doctor {
@@ -15518,8 +15340,8 @@ mod tests {
                 ..
             } => {
                 assert_eq!(
-                    model, "anthropic/claude-sonnet-4-6",
-                    "sonnet alias should resolve"
+                    model, "sonnet",
+                    "unaliased model names pass through to the daemon"
                 );
                 assert_eq!(
                     model_flag_raw.as_deref(),
@@ -16741,7 +16563,7 @@ mod tests {
             .expect("prompt shorthand should still work"),
             CliAction::Prompt {
                 prompt: "please debug this".to_string(),
-                model: "anthropic/claude-opus-4-7".to_string(),
+                model: "opus".to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: crate::default_permission_mode(),
@@ -17278,12 +17100,12 @@ mod tests {
     #[test]
     fn completion_candidates_include_workflow_shortcuts_and_dynamic_sessions() {
         let completions = slash_command_completion_candidates_with_sessions(
-            "sonnet",
+            "qwen35-oc:latest",
             Some("session-current"),
             vec!["session-old".to_string()],
         );
 
-        assert!(completions.contains(&"/model anthropic/claude-sonnet-4-6".to_string()));
+        assert!(completions.contains(&"/model qwen35-oc:latest".to_string()));
         assert!(completions.contains(&"/permissions workspace-write".to_string()));
         assert!(completions.contains(&"/session list".to_string()));
         assert!(completions.contains(&"/session switch session-current".to_string()));
@@ -17341,38 +17163,44 @@ mod tests {
     }
 
     #[test]
-    fn resolve_repl_model_falls_back_to_anthropic_model_env_when_default() {
+    fn resolve_repl_model_falls_back_to_env_model_when_default() {
         let _guard = env_lock();
         let root = temp_dir();
         fs::create_dir_all(&root).expect("root dir");
         let config_home = root.join("config");
         fs::create_dir_all(&config_home).expect("config home dir");
         std::env::set_var("CLAW_CONFIG_HOME", &config_home);
-        std::env::remove_var("ANTHROPIC_MODEL");
-        std::env::set_var("ANTHROPIC_MODEL", "sonnet");
+        std::env::set_var("OLLAMA_MODEL", "qwen35-oc:latest");
 
         let resolved = with_current_dir(&root, || resolve_repl_model(default_model().to_string()))
             .expect("env model should resolve");
 
-        assert_eq!(resolved, "anthropic/claude-sonnet-4-6");
+        assert_eq!(resolved, "qwen35-oc:latest");
 
-        std::env::remove_var("ANTHROPIC_MODEL");
+        std::env::remove_var("OLLAMA_MODEL");
         std::env::remove_var("CLAW_CONFIG_HOME");
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
     #[test]
-    fn resolve_repl_model_returns_default_when_env_unset_and_no_config() {
+    fn model_provenance_returns_default_when_env_unset_and_no_config() {
+        // `resolve_repl_model` now also exchanges the `auto` placeholder for a
+        // live model, which would make this a daemon-dependent test. The
+        // selection logic being asserted here lives one layer down.
         let _guard = env_lock();
         let root = temp_dir();
         fs::create_dir_all(&root).expect("root dir");
         let config_home = root.join("config");
         fs::create_dir_all(&config_home).expect("config home dir");
         std::env::set_var("CLAW_CONFIG_HOME", &config_home);
-        std::env::remove_var("ANTHROPIC_MODEL");
+        std::env::remove_var("OLLAMA_MODEL");
+        std::env::remove_var("CLAW_MODEL");
 
-        let resolved = with_current_dir(&root, || resolve_repl_model(default_model().to_string()))
-            .expect("default model should resolve");
+        let resolved = with_current_dir(&root, || {
+            super::ModelProvenance::from_env_or_config_or_default(default_model())
+        })
+        .expect("default model should resolve")
+        .resolved;
 
         assert_eq!(resolved, default_model());
 
@@ -19698,19 +19526,13 @@ mod alias_resolution_tests {
 
     #[test]
     fn test_alias_resolution_builtin() {
-        // Built-in aliases should resolve to their full IDs
+        // There is no built-in alias table any more; without user config a
+        // model name resolves to itself.
         assert_eq!(
-            resolve_model_alias_with_config("opus"),
-            "anthropic/claude-opus-4-7"
+            resolve_model_alias_with_config("qwen35-oc:latest"),
+            "qwen35-oc:latest"
         );
-        assert_eq!(
-            resolve_model_alias_with_config("sonnet"),
-            "anthropic/claude-sonnet-4-6"
-        );
-        assert_eq!(
-            resolve_model_alias_with_config("haiku"),
-            "anthropic/claude-haiku-4-5-20251213"
-        );
+        assert_eq!(resolve_model_alias_with_config("opus"), "opus");
     }
 
     #[test]

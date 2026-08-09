@@ -195,6 +195,33 @@ pub fn resolve() -> String {
     .clone()
 }
 
+/// Lists the models the local daemon is serving, from synchronous code.
+///
+/// Same contract as [`resolve`]: it runs the async lookup on a thread of its
+/// own so it is safe to call from inside a runtime, and an unreachable daemon
+/// yields `None` rather than an error, since "Ollama is not running" is a
+/// normal state for an interactive setup flow to report.
+#[must_use]
+pub fn tags_blocking() -> Option<Vec<String>> {
+    std::thread::spawn(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?
+            .block_on(async {
+                let http = reqwest::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(2))
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .unwrap_or_default();
+                tags(&http).await.ok()
+            })
+    })
+    .join()
+    .ok()
+    .flatten()
+}
+
 /// Resolves a default model straight from the local daemon.
 ///
 /// Convenience wrapper so callers that have no HTTP client of their own — the

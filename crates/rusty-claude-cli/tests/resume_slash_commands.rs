@@ -91,7 +91,7 @@ fn status_command_applies_cli_flags_end_to_end() {
         &temp_dir,
         &[
             "--model",
-            "sonnet",
+            "qwen35-oc:latest",
             "--permission-mode",
             "read-only",
             "status",
@@ -108,7 +108,7 @@ fn status_command_applies_cli_flags_end_to_end() {
 
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
     assert!(stdout.contains("Status"));
-    assert!(stdout.contains("Model            anthropic/claude-sonnet-4-6"));
+    assert!(stdout.contains("Model            qwen35-oc:latest"));
     assert!(stdout.contains("Permission mode  read-only"));
 }
 

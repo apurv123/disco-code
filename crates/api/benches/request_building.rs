@@ -15,7 +15,7 @@
 
 use api::{
     build_chat_completion_request, flatten_tool_result_content, is_reasoning_model,
-    translate_message, InputContentBlock, InputMessage, MessageRequest, OpenAiCompatConfig,
+    translate_message, InputContentBlock, InputMessage, MessageRequest,
     ToolResultContentBlock,
 };
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
@@ -166,7 +166,7 @@ fn bench_translate_message(c: &mut Criterion) {
 /// Benchmark build_chat_completion_request with various message counts
 fn bench_build_request(c: &mut Criterion) {
     let mut group = c.benchmark_group("build_chat_completion_request");
-    let config = OpenAiCompatConfig::openai();
+    let config = api::OLLAMA_CONFIG;
 
     for message_count in [10, 50, 100].iter() {
         let request = create_sample_request(*message_count);

@@ -56,7 +56,6 @@ mod tests {
     async fn query_missing_db_reports_phase() {
         let client = Client::new();
         let cfg = EmbedConfig {
-            api_key: "x".into(),
             base_url: "mock://".into(),
             model: "m".into(),
         };

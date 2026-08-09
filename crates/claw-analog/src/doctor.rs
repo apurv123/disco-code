@@ -11,17 +11,9 @@ use claw_analog::{
     AnalogFileConfig, OutputFormat, PermissionMode, Preset, StreamOverride, NDJSON_FORMAT_VERSION,
     NDJSON_SCHEMA,
 };
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::HeaderMap;
 
-const ENV_CHECK: &[&str] = &[
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_BASE_URL",
-    "OPENAI_API_KEY",
-    "OPENAI_BASE_URL",
-    "XAI_API_KEY",
-    "RAG_BASE_URL",
-];
+const ENV_CHECK: &[&str] = &["OLLAMA_HOST", "CLAW_RAG_EMBEDDING_MODEL", "RAG_BASE_URL"];
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum DoctorPermissionArg {
@@ -116,7 +108,7 @@ pub struct DoctorCli {
     /// Profile TOML path (optional; if omitted, uses TOML `profile` or default `~/.claw-analog/profile.toml`).
     #[arg(long, value_name = "PATH")]
     pub profile: Option<PathBuf>,
-    /// TCP connect to host:port from `ANTHROPIC_BASE_URL` (or default API URL); not a full HTTP check.
+    /// TCP connect to host:port from `OLLAMA_HOST` (or the default daemon address); not a full HTTP check.
     #[arg(long, visible_alias = "mock")]
     pub tcp_ping: bool,
     /// Skip HTTPS/TLS + auth + quota header checks against configured providers.
@@ -327,29 +319,8 @@ fn check_env() {
     for name in ENV_CHECK {
         mask_env_line(name);
     }
-    let anthro_ok = std::env::var("ANTHROPIC_API_KEY")
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
-        || std::env::var("ANTHROPIC_AUTH_TOKEN")
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false);
-    let openai_ok = std::env::var("OPENAI_API_KEY")
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
     println!();
-    if anthro_ok {
-        println!("Anthropic credentials: OK (API key and/or auth token).");
-    } else {
-        println!("Anthropic credentials: not set — needed for default Claude/Anthropic models.");
-    }
-    if openai_ok {
-        println!("OpenAI API key: set — use `openai/...` model prefix for that provider.");
-    } else {
-        println!("OpenAI API key: unset — only relevant for `openai/` models.");
-    }
-    if !anthro_ok && !openai_ok {
-        println!("\nNote: neither Anthropic nor OpenAI keys are set; live runs will fail until you export credentials (see USAGE.md).");
-    }
+    println!("Credentials: none required — inference is served by a local Ollama daemon.");
 }
 
 /// Walk upward from `start` for a `Cargo.toml` that defines `[workspace]`.
@@ -439,8 +410,8 @@ fn run_cargo_release_build(manifest_dir: Option<&Path>) -> bool {
     }
 }
 
-fn default_anthropic_base() -> String {
-    std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".into())
+fn default_inference_base() -> String {
+    api::ollama_host()
 }
 
 fn parse_host_port(url: &str) -> Result<(String, u16), String> {
@@ -468,8 +439,8 @@ fn parse_host_port(url: &str) -> Result<(String, u16), String> {
 }
 
 fn ping_print() {
-    let url = default_anthropic_base();
-    println!("TCP check for ANTHROPIC_BASE_URL (default if unset): {url}");
+    let url = default_inference_base();
+    println!("TCP check for OLLAMA_HOST (default if unset): {url}");
     match parse_host_port(&url) {
         Ok((host, port)) => match tcp_ping(&host, port) {
             Ok(()) => println!("  reachability: OK ({host}:{port})"),
@@ -502,74 +473,20 @@ fn http_checks_print(embeddings_check: bool) {
     };
 
     rt.block_on(async {
-        // OpenAI-compatible providers (OPENAI_BASE_URL, OPENAI_API_KEY)
-        if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-            if !key.trim().is_empty() {
-                let base = std::env::var("OPENAI_BASE_URL")
-                    .ok()
-                    .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-                let url = openai_models_url(base.as_str());
-                let mut headers = HeaderMap::new();
-                if let Ok(v) = HeaderValue::from_str(format!("Bearer {}", key.trim()).as_str()) {
-                    headers.insert(reqwest::header::AUTHORIZATION, v);
-                }
-                let _ = http_check_and_print("openai", url.as_str(), headers).await;
+        // Local inference daemon (OLLAMA_HOST).
+        let base = api::ollama_base();
+        let url = openai_models_url(base.as_str());
+        let _ = http_check_and_print("ollama", url.as_str(), HeaderMap::new()).await;
 
-                if embeddings_check {
-                    let model = std::env::var("OPENAI_EMBEDDING_MODEL")
-                        .ok()
-                        .or_else(|| std::env::var("CLAW_RAG_EMBEDDING_MODEL").ok())
-                        .unwrap_or_else(|| "text-embedding-3-small".to_string());
-                    let eurl = openai_embeddings_url(base.as_str());
-                    let mut eheaders = HeaderMap::new();
-                    if let Ok(v) = HeaderValue::from_str(format!("Bearer {}", key.trim()).as_str())
-                    {
-                        eheaders.insert(reqwest::header::AUTHORIZATION, v);
-                    }
-                    let _ = openai_embeddings_probe(
-                        "openai embeddings",
-                        eurl.as_str(),
-                        &model,
-                        eheaders,
-                    )
+        if embeddings_check {
+            let model = std::env::var("CLAW_RAG_EMBEDDING_MODEL")
+                .unwrap_or_else(|_| "nomic-embed-text".to_string());
+            let eurl = openai_embeddings_url(base.as_str());
+            let _ =
+                openai_embeddings_probe("ollama embeddings", eurl.as_str(), &model, HeaderMap::new())
                     .await;
-                } else {
-                    println!("  openai embeddings: skipped (pass --embeddings-check to enable)");
-                }
-            } else {
-                println!("  openai: skipped (OPENAI_API_KEY empty)");
-            }
         } else {
-            println!("  openai: skipped (OPENAI_API_KEY unset)");
-        }
-
-        // Anthropic (ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY/AUTH_TOKEN)
-        let a_key = std::env::var("ANTHROPIC_API_KEY").ok();
-        let a_tok = std::env::var("ANTHROPIC_AUTH_TOKEN").ok();
-        let a_base = std::env::var("ANTHROPIC_BASE_URL")
-            .ok()
-            .unwrap_or_else(|| "https://api.anthropic.com".to_string());
-        if a_key.as_deref().is_some_and(|s| !s.trim().is_empty())
-            || a_tok.as_deref().is_some_and(|s| !s.trim().is_empty())
-        {
-            let url = anthropic_models_url(a_base.as_str());
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                HeaderName::from_static("anthropic-version"),
-                HeaderValue::from_static("2023-06-01"),
-            );
-            if let Some(k) = a_key.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                if let Ok(v) = HeaderValue::from_str(k) {
-                    headers.insert(HeaderName::from_static("x-api-key"), v);
-                }
-            } else if let Some(t) = a_tok.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                if let Ok(v) = HeaderValue::from_str(format!("Bearer {t}").as_str()) {
-                    headers.insert(reqwest::header::AUTHORIZATION, v);
-                }
-            }
-            let _ = http_check_and_print("anthropic", url.as_str(), headers).await;
-        } else {
-            println!("  anthropic: skipped (no API key/token)");
+            println!("  ollama embeddings: skipped (pass --embeddings-check to enable)");
         }
 
         // RAG service (RAG_BASE_URL) — just basic health + stats.
@@ -605,11 +522,6 @@ fn openai_embeddings_url(base: &str) -> String {
     } else {
         format!("{b}/v1/embeddings")
     }
-}
-
-fn anthropic_models_url(base: &str) -> String {
-    let b = base.trim().trim_end_matches('/');
-    format!("{b}/v1/models?limit=1")
 }
 
 async fn http_check_and_print(label: &str, url: &str, headers: HeaderMap) -> Result<(), ()> {

@@ -527,7 +527,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "api-key",
         aliases: &[],
-        summary: "Show or set the Anthropic API key",
+        summary: "Removed: the local daemon needs no API key",
         argument_hint: Some("[key]"),
         resume_supported: false,
     },
@@ -1407,7 +1407,7 @@ pub fn validate_slash_command_input(
         }
         "login" | "logout" => {
             return Err(command_error(
-                "This auth flow was removed. Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN instead.",
+                "This auth flow was removed. Disco Code runs against a local Ollama daemon and needs no login.",
                 command,
                 "",
             ));
@@ -5959,11 +5959,13 @@ mod tests {
     }
 
     #[test]
-    fn removed_login_and_logout_commands_report_env_auth_guidance() {
+    fn removed_login_and_logout_commands_report_local_daemon_guidance() {
+        // These used to point users at ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN.
+        // Disco Code talks to a local daemon, so there is no login at all.
         let login_error = parse_error_message("/login");
-        assert!(login_error.contains("ANTHROPIC_API_KEY"));
+        assert!(login_error.contains("needs no login"));
         let logout_error = parse_error_message("/logout");
-        assert!(logout_error.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(logout_error.contains("needs no login"));
     }
 
     #[test]
