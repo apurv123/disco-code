@@ -79,6 +79,14 @@ pub enum ApiError {
         max_bytes: usize,
         provider: &'static str,
     },
+    /// The egress policy refused an outbound request because it targets a
+    /// hosted model inference endpoint. Never retryable: retrying would only
+    /// attempt the same forbidden call again.
+    EgressBlocked {
+        url: String,
+        host: String,
+        reason: String,
+    },
 }
 
 impl ApiError {
@@ -157,7 +165,8 @@ impl ApiError {
             | Self::Json { .. }
             | Self::InvalidSseFrame(_)
             | Self::BackoffOverflow { .. }
-            | Self::RequestBodySizeExceeded { .. } => false,
+            | Self::RequestBodySizeExceeded { .. }
+            | Self::EgressBlocked { .. } => false,
         }
     }
 
@@ -176,7 +185,8 @@ impl ApiError {
             | Self::Json { .. }
             | Self::InvalidSseFrame(_)
             | Self::BackoffOverflow { .. }
-            | Self::RequestBodySizeExceeded { .. } => None,
+            | Self::RequestBodySizeExceeded { .. }
+            | Self::EgressBlocked { .. } => None,
         }
     }
 
@@ -202,6 +212,7 @@ impl ApiError {
             }
             Self::InvalidApiKeyEnv(_) | Self::Io(_) | Self::Json { .. } => "runtime_io",
             Self::RequestBodySizeExceeded { .. } => "request_size",
+            Self::EgressBlocked { .. } => "egress_blocked",
         }
     }
 
@@ -225,7 +236,8 @@ impl ApiError {
             | Self::Json { .. }
             | Self::InvalidSseFrame(_)
             | Self::BackoffOverflow { .. }
-            | Self::RequestBodySizeExceeded { .. } => false,
+            | Self::RequestBodySizeExceeded { .. }
+            | Self::EgressBlocked { .. } => false,
         }
     }
 
@@ -255,7 +267,8 @@ impl ApiError {
             | Self::Json { .. }
             | Self::InvalidSseFrame(_)
             | Self::BackoffOverflow { .. }
-            | Self::RequestBodySizeExceeded { .. } => false,
+            | Self::RequestBodySizeExceeded { .. }
+            | Self::EgressBlocked { .. } => false,
         }
     }
 }
@@ -397,6 +410,20 @@ impl Display for ApiError {
                 f,
                 "request body size ({estimated_bytes} bytes) exceeds {provider} limit ({max_bytes} bytes); reduce prompt length or context before retrying"
             ),
+            Self::EgressBlocked { url, host, reason } => write!(
+                f,
+                "refused to send request to {url}: {reason} (host: {host})"
+            ),
+        }
+    }
+}
+
+impl From<runtime::egress::BlockedError> for ApiError {
+    fn from(value: runtime::egress::BlockedError) -> Self {
+        Self::EgressBlocked {
+            url: value.url,
+            host: value.host,
+            reason: value.reason,
         }
     }
 }

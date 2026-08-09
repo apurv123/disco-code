@@ -73,6 +73,11 @@ pub async fn embed_batch(
     }
 
     let url = format!("{}/embeddings", cfg.base_url);
+
+    // Indexing sends repository source code to this endpoint. The base URL is
+    // env-configurable, so it is guarded like any other inference call.
+    runtime::egress::guard(&url).map_err(|e| e.to_string())?;
+
     let inputs: Vec<&str> = texts.iter().map(String::as_str).collect();
     let body = EmbeddingsRequest {
         model: &cfg.model,

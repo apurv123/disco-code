@@ -59,7 +59,7 @@ cargo test --workspace
 | A | Foundation: Rust core, licensing, attribution | done |
 | B | Ollama-only inference with live model detection | done |
 | B2 | Removal of all hosted-provider code paths | done |
-| C | Egress policy enforcement | planned |
+| C | Egress policy enforcement | done |
 | D | Prompt-enhancement pipeline tuned for local models | planned |
 | E | Tauri desktop shell and interface layer | planned |
 | F | Tooling: MCP, web search, code search | planned |

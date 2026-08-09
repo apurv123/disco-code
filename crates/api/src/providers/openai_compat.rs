@@ -334,6 +334,12 @@ impl OpenAiCompatClient {
         check_request_body_size_for_base_url(request, self.config(), &self.base_url)?;
 
         let request_url = chat_completions_endpoint(&self.base_url);
+
+        // Inference is the one thing that must never reach a cloud provider.
+        // `base_url` comes from `OLLAMA_HOST`, so without this a single
+        // environment variable would be enough to ship every prompt offsite.
+        runtime::egress::guard(&request_url)?;
+
         self.http
             .post(&request_url)
             .header("content-type", "application/json")
