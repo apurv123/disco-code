@@ -38,26 +38,34 @@ impl From<ConfigError> for PromptBuildError {
 
 /// Marker separating static prompt scaffolding from dynamic runtime context.
 pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
-/// Human-readable default frontier model name embedded into generated prompts.
-pub const FRONTIER_MODEL_NAME: &str = "Claude Opus 4.6";
+/// The assistant's own name, used in the environment section of the prompt.
+pub const ASSISTANT_NAME: &str = "Disco Code";
 const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
 const MAX_GIT_DIFF_CHARS: usize = 50_000;
 
-/// Neutral identity for the model family line in generated prompts.
+/// Identity presented in the model family line.
+///
+/// claw-code used this to decide whether to claim a Claude identity. Disco Code
+/// drives whatever open model the user has pulled, and telling a Qwen model it
+/// is Claude Opus measurably degrades it: it starts imitating a frontier
+/// model's confidence without the capability behind it. The remaining variants
+/// describe the running model honestly.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ModelFamilyIdentity {
+    /// A local open-weights model of unstated family.
     #[default]
-    Claude,
     Generic,
+    /// A local model whose name is known; shown verbatim.
+    Named(&'static str),
 }
 
 impl ModelFamilyIdentity {
     #[must_use]
     pub const fn family_label(self) -> &'static str {
         match self {
-            Self::Claude => FRONTIER_MODEL_NAME,
-            Self::Generic => "an AI assistant",
+            Self::Generic => "a local open-weights model running via Ollama",
+            Self::Named(name) => name,
         }
     }
 }
@@ -216,6 +224,7 @@ impl SystemPromptBuilder {
         }
         sections.push(get_simple_system_section());
         sections.push(get_simple_doing_tasks_section());
+        sections.push(get_local_model_section());
         sections.push(get_actions_section());
         sections.push(SYSTEM_PROMPT_DYNAMIC_BOUNDARY.to_string());
         sections.push(self.environment_section());
@@ -249,6 +258,7 @@ impl SystemPromptBuilder {
         let identity = self.model_family.unwrap_or_default();
         let mut lines = vec!["# Environment context".to_string()];
         lines.extend(prepend_bullets(vec![
+            format!("You are {ASSISTANT_NAME}, a local coding agent."),
             format!("Model family: {}", identity.family_label()),
             format!("Working directory: {cwd}"),
             format!("Date: {date}"),
@@ -711,6 +721,29 @@ fn get_simple_doing_tasks_section() -> String {
     ]);
 
     std::iter::once("# Doing tasks".to_string())
+        .chain(items)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Guidance aimed at the specific ways smaller local models go wrong.
+///
+/// These are not generic manners. Each line targets a failure mode that shows
+/// up far more often at 7-14B than at frontier scale: answering from a memory
+/// of similar code rather than this code, inventing a plausible API, and
+/// reporting a test as passing without having run it.
+fn get_local_model_section() -> String {
+    let items = prepend_bullets(vec![
+        "Open the file before describing what is in it. Never answer from a memory of similar code; this project is not the project you were trained on.".to_string(),
+        "Never invent a function, flag, file path, or library API. If you are not sure it exists, check. An invented symbol that looks right is worse than admitting you do not know.".to_string(),
+        "Never state that a command succeeded, a test passed, or a build is clean unless you ran it and saw the output in this session.".to_string(),
+        "Quote real output rather than paraphrasing it. If you did not capture the output, say so.".to_string(),
+        "Do one thing at a time and finish it. Partial work on five fronts is less useful than one completed change.".to_string(),
+        "If the request is ambiguous, ask rather than picking an interpretation and building on it silently.".to_string(),
+        "Prefer a short, correct answer to a long, hedged one. Length is not thoroughness.".to_string(),
+    ]);
+
+    std::iter::once("# Working accurately".to_string())
         .chain(items)
         .collect::<Vec<_>>()
         .join("\n")
@@ -1203,7 +1236,7 @@ mod tests {
             "2026-03-31",
             "linux",
             "6.8",
-            ModelFamilyIdentity::Claude,
+            ModelFamilyIdentity::Generic,
         )
         .expect("system prompt should load")
         .join(
@@ -1252,7 +1285,7 @@ mod tests {
             "2026-03-31",
             "linux",
             "6.8",
-            ModelFamilyIdentity::Claude,
+            ModelFamilyIdentity::Generic,
         )
         .expect("system prompt should load")
         .join("\n\n");
@@ -1274,7 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_default_claude_model_family_identity() {
+    fn renders_local_model_family_identity_by_default() {
         // given: a prompt builder without an explicit model family override
         let project_context = ProjectContext {
             cwd: PathBuf::from("/tmp/project"),
@@ -1288,13 +1321,22 @@ mod tests {
             .with_project_context(project_context)
             .render();
 
-        // then: the Claude model family label is preserved by default
-        assert!(prompt.contains("Model family: Claude Opus 4.6"));
+        // then: the default identity is local, and no frontier vendor is named.
+        // Telling a 9B model it is Claude Opus invites it to imitate a
+        // confidence it does not have.
+        assert!(
+            prompt.contains("Model family: a local open-weights model running via Ollama"),
+            "default identity should describe local inference: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Claude"),
+            "no hosted vendor may be named in the prompt: {prompt}"
+        );
     }
 
     #[test]
-    fn renders_generic_model_family_identity_without_claude_label() {
-        // given: a prompt builder with generic model family identity
+    fn renders_named_model_family_identity_when_supplied() {
+        // given: a prompt builder told which local model is actually serving
         let project_context = ProjectContext {
             cwd: PathBuf::from("/tmp/project"),
             current_date: "2026-03-31".to_string(),
@@ -1304,7 +1346,7 @@ mod tests {
         // when: rendering the system prompt environment section
         let prompt = SystemPromptBuilder::new()
             .with_os("linux", "6.8")
-            .with_model_family(ModelFamilyIdentity::Generic)
+            .with_model_family(ModelFamilyIdentity::Named("qwen35-oc"))
             .with_project_context(project_context)
             .render();
         let model_family_line = prompt
@@ -1312,9 +1354,8 @@ mod tests {
             .find(|line| line.contains("Model family:"))
             .expect("model family line should render");
 
-        // then: the model family line is neutral and excludes Claude Opus 4.6
-        assert_eq!(model_family_line, " - Model family: an AI assistant");
-        assert!(!model_family_line.contains("Claude Opus 4.6"));
+        // then: the supplied name is used verbatim
+        assert_eq!(model_family_line, " - Model family: qwen35-oc");
     }
 
     #[test]

@@ -99,15 +99,39 @@ const OLLAMA_MAX_RETRIES: u32 = 2;
 const OLLAMA_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const OLLAMA_MAX_BACKOFF: Duration = Duration::from_secs(2);
 
+/// Request timeout for the local daemon.
+///
+/// The 300s default is a cloud assumption: hosted APIs are billed per token and
+/// share a connection pool, so an open request has a real cost and capping it is
+/// prudent. Neither applies to a daemon on this machine. Local generation on a
+/// large context legitimately runs past five minutes — more so under the
+/// prompt-enhancement harness, which issues several turns per request — and
+/// cutting it off surfaces as `error decoding response body` partway through a
+/// perfectly healthy generation.
+///
+/// This does not reintroduce the hang fixed in checkpoint B: an unreachable
+/// daemon fails at *connect* (2s, two retries), never reaching this timeout.
+const OLLAMA_REQUEST_TIMEOUT: Duration = Duration::from_secs(1_800);
+
 /// Builds the HTTP client used for local inference.
 ///
-/// The request timeout deliberately keeps the generous default: generation on a
-/// local model legitimately runs for minutes, and that is a healthy daemon
-/// working, not a stall. Only connection establishment is tightened.
+/// Only connection establishment is tightened; generation is given room.
+/// `CLAW_API_CONNECT_TIMEOUT` and `CLAW_API_REQUEST_TIMEOUT` still override
+/// both when explicitly set.
 fn ollama_http_client() -> reqwest::Client {
+    let env_timeouts = crate::http_client::TimeoutConfig::from_env();
+    let defaults = crate::http_client::TimeoutConfig::default();
     let timeouts = crate::http_client::TimeoutConfig {
-        connect_timeout: OLLAMA_CONNECT_TIMEOUT,
-        ..crate::http_client::TimeoutConfig::from_env()
+        connect_timeout: if env_timeouts.connect_timeout == defaults.connect_timeout {
+            OLLAMA_CONNECT_TIMEOUT
+        } else {
+            env_timeouts.connect_timeout
+        },
+        request_timeout: if env_timeouts.request_timeout == defaults.request_timeout {
+            OLLAMA_REQUEST_TIMEOUT
+        } else {
+            env_timeouts.request_timeout
+        },
     };
     crate::http_client::build_http_client_with_opts(
         &crate::http_client::ProxyConfig::from_env(),

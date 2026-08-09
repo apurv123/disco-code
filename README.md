@@ -17,6 +17,8 @@ Disco Code combines two MIT-licensed open source projects into one product:
   MCP lifecycle, the tool suite, and the prompt-construction pipeline.
 - **[opencode](https://github.com/anomalyco/opencode)** contributes the
   interface layer and developer experience.
+- **[oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex)** contributes the
+  design of the staged prompt-enhancement harness.
 
 Disco Code is itself MIT licensed. See [LICENSE](LICENSE) for the combined
 notice and [NOTICE](NOTICE) for a per-component attribution map.
@@ -40,6 +42,14 @@ claw-code's prompt-construction pipeline — project context discovery,
 instruction-file resolution, git state, and budgeted context assembly — and
 tunes it for local inference.
 
+On top of that, a request can be run as a staged harness rather than a single
+turn: clarify what is ambiguous, plan before editing, harden anything
+irreversible, execute, then verify the result against the criteria the plan
+stated. Which stages run is decided per request, so `fix the typo in README.md`
+stays one turn while `clean this up` earns the full pipeline. Run
+`claw enhance "<request>"` to see the decision without spending any inference,
+or pass `--enhance` to a normal run to use it.
+
 ## Requirements
 
 - [Ollama](https://ollama.com), running, with at least one model pulled
@@ -60,7 +70,7 @@ cargo test --workspace
 | B | Ollama-only inference with live model detection | done |
 | B2 | Removal of all hosted-provider code paths | done |
 | C | Egress policy enforcement | done |
-| D | Prompt-enhancement pipeline tuned for local models | planned |
+| D | Prompt-enhancement pipeline tuned for local models | done |
 | E | Tauri desktop shell and interface layer | planned |
 | F | Tooling: MCP, web search, code search | planned |
 

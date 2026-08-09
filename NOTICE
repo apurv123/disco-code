@@ -2,13 +2,13 @@ Disco Code
 ==========
 
 Disco Code is an open source, local-inference coding agent distributed under the
-MIT License. It is a derivative work combining two upstream MIT-licensed
+MIT License. It is a derivative work combining upstream MIT-licensed
 projects. This file records which parts of the tree derive from which upstream,
 so that license inheritance is auditable.
 
-Both upstreams are MIT licensed, and MIT permits derivative works and
+All upstreams are MIT licensed, and MIT permits derivative works and
 relicensing under the same terms provided the original copyright and permission
-notices are retained. Disco Code therefore remains MIT and reproduces both
+notices are retained. Disco Code therefore remains MIT and reproduces those
 notices in LICENSE.
 
 
@@ -50,6 +50,31 @@ they land, covering the user interface layer, session presentation, and
 supporting developer experience. opencode is TypeScript/SolidJS; Disco Code
 consumes its interface layer as the webview frontend of a Tauri shell while the
 Rust crates above remain the core.
+
+
+Upstream 3: oh-my-codex
+-----------------------
+Source:    https://github.com/Yeachan-Heo/oh-my-codex
+License:   MIT
+Copyright: (c) 2025 Yeachan Heo
+
+Derived component:
+
+    crates/runtime/src/enhance.rs   Staged prompt-enhancement harness
+
+The project brief attributed prompt-enhancement logic to Claw Code. It is not
+there: Claw Code builds a conventional single system prompt, and its Python
+tree is port-status metadata rather than behaviour. The staged approach —
+interviewing for ambiguity, planning before editing, hardening irreversible
+work, then verifying against stated criteria — originates in oh-my-codex, which
+implements it as a workflow layer around a different agent. No oh-my-codex code
+is copied; the design is reimplemented in Rust, and the attribution is recorded
+here because the design is the borrowed part.
+
+Two deliberate departures: stage selection is triaged per request rather than
+always running the full pipeline, so simple edits stay one turn; and triage is
+deterministic heuristics rather than a model call, because judgement is the
+first capability to degrade at local model sizes.
 
 
 Deliberate exclusions

@@ -35,12 +35,42 @@ fn is_binary_file(path: &Path) -> io::Result<bool> {
     Ok(buffer[..bytes_read].contains(&0))
 }
 
+/// Strip Windows' `\\?\` extended-length prefix from a disk path.
+///
+/// `Path::canonicalize` on Windows returns verbatim paths (`\\?\C:\dir`), while
+/// paths built from user input or `current_dir` are ordinary (`C:\dir`). The two
+/// spellings name the same location but share no textual prefix, so comparing
+/// them with `starts_with` reports that a directory escapes *itself*. Only the
+/// `VerbatimDisk` form is rewritten: `\\?\UNC\server\share` denotes a genuinely
+/// different location than any drive path, so it is left untouched rather than
+/// flattened into something that might compare equal to an unrelated path.
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path.to_path_buf();
+    };
+    let Prefix::VerbatimDisk(letter) = prefix.kind() else {
+        return path.to_path_buf();
+    };
+
+    let mut rebuilt = PathBuf::from(format!("{}:\\", letter as char));
+    rebuilt.extend(components.filter(|c| !matches!(c, Component::RootDir)));
+    rebuilt
+}
+
 /// Validate that a resolved path stays within the given workspace root.
 /// Returns the canonical path on success, or an error if the path escapes
 /// the workspace boundary (e.g. via `../` traversal or symlink).
 #[allow(dead_code)]
 fn validate_workspace_boundary(resolved: &Path, workspace_root: &Path) -> io::Result<()> {
-    if !resolved.starts_with(workspace_root) {
+    // Compare in one spelling. Both sides are normalized because either can
+    // arrive verbatim depending on whether it survived a `canonicalize` call.
+    let resolved_cmp = strip_verbatim_prefix(resolved);
+    let root_cmp = strip_verbatim_prefix(workspace_root);
+
+    if !resolved_cmp.starts_with(&root_cmp) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
@@ -1066,5 +1096,58 @@ mod tests {
         assert!(component_contains_glob("**"));
         assert!(component_contains_glob("*.rs"));
         assert!(!component_contains_glob("src"));
+    }
+}
+
+#[cfg(test)]
+mod workspace_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn canonicalized_root_accepts_its_own_non_canonical_path() {
+        let root = std::env::temp_dir().join("claw-boundary-selfcheck");
+        fs::create_dir_all(&root).expect("temp dir");
+        let canonical = root.canonicalize().expect("canonicalize");
+
+        // The regression: on Windows `canonical` is `\\?\C:\...` while `root`
+        // is `C:\...`. A directory must never be judged to escape itself.
+        validate_workspace_boundary(&root, &canonical)
+            .expect("a workspace root must contain itself regardless of spelling");
+        validate_workspace_boundary(&canonical, &root)
+            .expect("comparison must hold in both directions");
+    }
+
+    #[test]
+    fn child_paths_are_accepted_across_spellings() {
+        let root = std::env::temp_dir().join("claw-boundary-child");
+        fs::create_dir_all(root.join("nested")).expect("temp dir");
+        let canonical = root.canonicalize().expect("canonicalize");
+
+        validate_workspace_boundary(&root.join("nested").join("file.rs"), &canonical)
+            .expect("a file inside the workspace must be allowed");
+    }
+
+    #[test]
+    fn real_escapes_are_still_rejected() {
+        let root = std::env::temp_dir().join("claw-boundary-escape");
+        fs::create_dir_all(&root).expect("temp dir");
+        let canonical = root.canonicalize().expect("canonicalize");
+
+        let outside = std::env::temp_dir().join("claw-boundary-elsewhere");
+        assert!(
+            validate_workspace_boundary(&outside, &canonical).is_err(),
+            "normalizing prefixes must not weaken the boundary check"
+        );
+    }
+
+    #[test]
+    fn sibling_prefix_is_not_treated_as_containment() {
+        // `C:\ws-evil` starts with the string `C:\ws` but is not inside it.
+        let root = Path::new("C:\\ws");
+        let sibling = Path::new("C:\\ws-evil\\secrets.txt");
+        assert!(
+            validate_workspace_boundary(sibling, root).is_err(),
+            "path comparison must be component-wise, not textual"
+        );
     }
 }
