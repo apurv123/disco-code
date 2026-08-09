@@ -1,7 +1,17 @@
 MIT License
 
-Copyright (c) 2026 Apurv Saxena
-Copyright (c) 2025 opencode
+Copyright (c) 2026 Disco Code contributors
+
+Disco Code is a derivative work that combines source code from two upstream
+projects, both of which are distributed under the MIT License. Their original
+copyright notices are reproduced below and continue to apply to the portions of
+this work derived from them. See NOTICE for a per-component attribution map.
+
+    Copyright (c) 2026 UltraWorkers and Claw Code contributors
+    (https://github.com/ultraworkers/claw-code)
+
+    Copyright (c) 2025 opencode
+    (https://github.com/anomalyco/opencode)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

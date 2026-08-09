@@ -1,31 +1,16 @@
-.DS_Store
-node_modules
-.worktrees
-.sst
-.env
-.idea
-.vscode
-.codex
-*~
-playground
-tmp
-dist
-ts-dist
-.turbo
-**/.serena
-.serena/
-/result
-refs
-Session.vim
-/opencode.json
-a.out
-target
-.scripts
-.direnv/
+/target
+**/*.rs.bk
+*.pdb
 
-# Local dev files
-opencode-dev
-UPCOMING_CHANGELOG.md
-logs/
-*.bun-build
-tsconfig.tsbuildinfo
+node_modules
+dist
+.DS_Store
+
+# Runtime/test artifacts written by the agent into the working tree
+.claw/
+.clawd-agents/
+.clawd-todos.json
+.claude/sessions
+.env
+.env.*
+!.env.example
