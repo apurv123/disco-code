@@ -489,6 +489,7 @@ dependencies = [
  "dotenvy",
  "qdrant-client",
  "reqwest",
+ "runtime",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2117,6 +2118,7 @@ dependencies = [
  "telemetry",
  "tempfile",
  "tokio",
+ "url",
  "walkdir",
 ]
 

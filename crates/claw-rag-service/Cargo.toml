@@ -19,6 +19,7 @@ walkdir = "2"
 qdrant-client = { version = "1.17", optional = true }
 blake3 = "1"
 api = { path = "../api" }
+runtime = { path = "../runtime" }
 
 [dev-dependencies]
 tempfile = "3"

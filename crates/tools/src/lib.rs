@@ -1941,6 +1941,7 @@ fn run_mcp_auth(input: McpAuthInput) -> Result<String, String> {
 #[allow(clippy::needless_pass_by_value)]
 fn run_remote_trigger(input: RemoteTriggerInput) -> Result<String, String> {
     let method = input.method.unwrap_or_else(|| "GET".to_string());
+    runtime::egress::guard(&input.url).map_err(|e| e.to_string())?;
     let client = Client::new();
 
     let mut request = match method.to_uppercase().as_str() {
@@ -3356,6 +3357,7 @@ fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
     let started = Instant::now();
     let client = build_http_client()?;
     let request_url = normalize_fetch_url(&input.url)?;
+    runtime::egress::guard(request_url.as_str()).map_err(|e| e.to_string())?;
     let response = client
         .get(request_url.clone())
         .send()
@@ -3390,6 +3392,7 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
     let started = Instant::now();
     let client = build_http_client()?;
     let search_url = build_search_url(&input.query)?;
+    runtime::egress::guard(search_url.as_str()).map_err(|e| e.to_string())?;
     let response = client
         .get(search_url)
         .send()
