@@ -1266,16 +1266,47 @@ impl McpStdioProcess {
         Ok(payload)
     }
 
+    /// Write a JSON-RPC message using the framing the MCP stdio transport actually
+    /// specifies: one compact JSON value per line, newline-terminated.
+    ///
+    /// This deliberately does *not* use [`Self::write_frame`]. `write_frame` emits
+    /// LSP-style `Content-Length` headers, which no spec-compliant MCP server parses;
+    /// sending those made every real server (verified against `@playwright/mcp`) sit
+    /// silent until the handshake timed out. `write_frame`/`read_frame` are retained
+    /// for callers that genuinely speak the header-framed dialect.
     pub async fn write_jsonrpc_message<T: Serialize>(&mut self, message: &T) -> io::Result<()> {
         let body = serde_json::to_vec(message)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        self.write_frame(&body).await
+        self.write_all(&body).await?;
+        self.write_all(b"\n").await?;
+        self.flush().await
     }
 
+    /// Read the next newline-delimited JSON-RPC message.
+    ///
+    /// Real servers are launched through wrappers (`npx`, `uvx`, shell shims) that
+    /// leak non-JSON noise onto stdout. Lines that are blank or not valid JSON are
+    /// skipped rather than treated as protocol errors, so one stray npm notice can't
+    /// kill an otherwise healthy session.
     pub async fn read_jsonrpc_message<T: DeserializeOwned>(&mut self) -> io::Result<T> {
-        let payload = self.read_frame().await?;
-        serde_json::from_slice(&payload)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        loop {
+            let line = self.read_line().await?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<T>(trimmed) {
+                Ok(message) => return Ok(message),
+                Err(error) => {
+                    // A line that parses as JSON but not as the expected message type
+                    // is a genuine protocol violation and must surface. Anything that
+                    // isn't JSON at all is wrapper noise, so skip it.
+                    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+                        return Err(io::Error::new(io::ErrorKind::InvalidData, error));
+                    }
+                }
+            }
+        }
     }
 
     pub async fn send_request<T: Serialize>(
@@ -1407,6 +1438,18 @@ fn apply_env(command: &mut Command, env: &BTreeMap<String, String>) {
     }
 }
 
+/// Interpreter used to run the Python MCP stubs in this crate's tests.
+///
+/// The stubs previously hard-coded `python3`, which does not exist on Windows
+/// (there the interpreter is `python`, and `python3` resolves to a Microsoft Store
+/// alias shim that fails to spawn). Every stub-backed MCP test therefore failed to
+/// start its server on Windows and had been silently inert — which is how a
+/// protocol-level framing bug survived in code that looked well covered.
+#[cfg(test)]
+pub(crate) fn python_command() -> &'static str {
+    if cfg!(windows) { "python" } else { "python3" }
+}
+
 fn encode_frame(payload: &[u8]) -> Vec<u8> {
     let header = format!("Content-Length: {}\r\n\r\n", payload.len());
     let mut framed = header.into_bytes();
@@ -1466,6 +1509,11 @@ mod tests {
         let _ = path;
     }
 
+    /// Interpreter used to run the Python MCP stubs below.
+    ///
+    /// See [`crate::mcp_stdio::python_command`] for why this is not `python3`.
+    use crate::mcp_stdio::python_command;
+
     fn temp_dir() -> PathBuf {
         static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
@@ -1476,6 +1524,8 @@ mod tests {
         std::env::temp_dir().join(format!("runtime-mcp-stdio-{nanos}-{unique_id}"))
     }
 
+    /// POSIX-only #!/bin/sh stub, used only by the cfg(unix) transport tests.
+    #[cfg(unix)]
     fn write_echo_script() -> PathBuf {
         let root = temp_dir();
         fs::create_dir_all(&root).expect("temp dir");
@@ -1496,24 +1546,14 @@ mod tests {
         let script = [
             "#!/usr/bin/env python3",
             "import json, os, sys",
-            "LOWERCASE_CONTENT_LENGTH = os.environ.get('MCP_LOWERCASE_CONTENT_LENGTH') == '1'",
             "MISMATCHED_RESPONSE_ID = os.environ.get('MCP_MISMATCHED_RESPONSE_ID') == '1'",
-            "header = b''",
-            r"while not header.endswith(b'\r\n\r\n'):",
-            "    chunk = sys.stdin.buffer.read(1)",
-            "    if not chunk:",
-            "        raise SystemExit(1)",
-            "    header += chunk",
-            "length = 0",
-            r"for line in header.decode().split('\r\n'):",
-            r"    if line.lower().startswith('content-length:'):",
-            r"        length = int(line.split(':', 1)[1].strip())",
-            "payload = sys.stdin.buffer.read(length)",
-            "request = json.loads(payload.decode())",
+            "line = sys.stdin.readline()",
+            "if not line:",
+            "    raise SystemExit(1)",
+            "request = json.loads(line)",
             r"assert request['jsonrpc'] == '2.0'",
             r"assert request['method'] == 'initialize'",
             "response_id = 'wrong-id' if MISMATCHED_RESPONSE_ID else request['id']",
-            "header_name = 'content-length' if LOWERCASE_CONTENT_LENGTH else 'Content-Length'",
             r"response = json.dumps({",
             r"    'jsonrpc': '2.0',",
             r"    'id': response_id,",
@@ -1522,9 +1562,43 @@ mod tests {
             r"        'capabilities': {'tools': {}},",
             r"        'serverInfo': {'name': 'fake-mcp', 'version': '0.1.0'}",
             r"    }",
-            r"}).encode()",
-            r"sys.stdout.buffer.write(f'{header_name}: {len(response)}\r\n\r\n'.encode() + response)",
-            "sys.stdout.buffer.flush()",
+            r"})",
+            r"sys.stdout.write(response + '\n')",
+            "sys.stdout.flush()",
+            "",
+        ]
+        .join("\n");
+        fs::write(&script_path, script).expect("write script");
+        chmod(&script_path);
+        script_path
+    }
+
+    /// Same as [`write_jsonrpc_script`] but emits wrapper-style noise on stdout
+    /// before the response, mimicking what `npx`/`npm` print in the wild.
+    fn write_noisy_jsonrpc_script() -> PathBuf {
+        let root = temp_dir();
+        fs::create_dir_all(&root).expect("temp dir");
+        let script_path = root.join("noisy-jsonrpc-mcp.py");
+        let script = [
+            "#!/usr/bin/env python3",
+            "import json, sys",
+            r"sys.stdout.write('npm warn exec ignoring workspace config\n')",
+            r"sys.stdout.write('\n')",
+            "line = sys.stdin.readline()",
+            "if not line:",
+            "    raise SystemExit(1)",
+            "request = json.loads(line)",
+            r"response = json.dumps({",
+            r"    'jsonrpc': '2.0',",
+            r"    'id': request['id'],",
+            r"    'result': {",
+            r"        'protocolVersion': request['params']['protocolVersion'],",
+            r"        'capabilities': {'tools': {}},",
+            r"        'serverInfo': {'name': 'fake-mcp', 'version': '0.1.0'}",
+            r"    }",
+            r"})",
+            r"sys.stdout.write(response + '\n')",
+            "sys.stdout.flush()",
             "",
         ]
         .join("\n");
@@ -1545,23 +1619,14 @@ mod tests {
             "INVALID_TOOL_CALL_RESPONSE = os.environ.get('MCP_INVALID_TOOL_CALL_RESPONSE') == '1'",
             "",
             "def read_message():",
-            "    header = b''",
-            r"    while not header.endswith(b'\r\n\r\n'):",
-            "        chunk = sys.stdin.buffer.read(1)",
-            "        if not chunk:",
-            "            return None",
-            "        header += chunk",
-            "    length = 0",
-            r"    for line in header.decode().split('\r\n'):",
-            r"        if line.lower().startswith('content-length:'):",
-            r"            length = int(line.split(':', 1)[1].strip())",
-            "    payload = sys.stdin.buffer.read(length)",
-            "    return json.loads(payload.decode())",
+            "    line = sys.stdin.readline()",
+            "    if not line:",
+            "        return None",
+            "    return json.loads(line)",
             "",
             "def send_message(message):",
-            "    payload = json.dumps(message).encode()",
-            r"    sys.stdout.buffer.write(f'Content-Length: {len(payload)}\r\n\r\n'.encode() + payload)",
-            "    sys.stdout.buffer.flush()",
+            r"    sys.stdout.write(json.dumps(message) + '\n')",
+            "    sys.stdout.flush()",
             "",
             "while True:",
             "    request = read_message()",
@@ -1598,8 +1663,10 @@ mod tests {
             "        })",
             "    elif method == 'tools/call':",
             "        if INVALID_TOOL_CALL_RESPONSE:",
-            "            sys.stdout.buffer.write(b'Content-Length: 5\\r\\n\\r\\nnope!')",
-            "            sys.stdout.buffer.flush()",
+            "            # Well-formed JSON that is not a valid JSON-RPC response, so the",
+            "            # client must surface a parse error rather than skip the line.",
+            "            sys.stdout.write('{\"not_a_jsonrpc_response\": true}' + '\\n')",
+            "            sys.stdout.flush()",
             "            continue",
             "        if TOOL_CALL_DELAY_MS:",
             "            time.sleep(TOOL_CALL_DELAY_MS / 1000)",
@@ -1696,23 +1763,14 @@ mod tests {
             "    return True",
             "",
             "def read_message():",
-            "    header = b''",
-            r"    while not header.endswith(b'\r\n\r\n'):",
-            "        chunk = sys.stdin.buffer.read(1)",
-            "        if not chunk:",
-            "            return None",
-            "        header += chunk",
-            "    length = 0",
-            r"    for line in header.decode().split('\r\n'):",
-            r"        if line.lower().startswith('content-length:'):",
-            r"            length = int(line.split(':', 1)[1].strip())",
-            "    payload = sys.stdin.buffer.read(length)",
-            "    return json.loads(payload.decode())",
+            "    line = sys.stdin.readline()",
+            "    if not line:",
+            "        return None",
+            "    return json.loads(line)",
             "",
             "def send_message(message):",
-            "    payload = json.dumps(message).encode()",
-            r"    sys.stdout.buffer.write(f'Content-Length: {len(payload)}\r\n\r\n'.encode() + payload)",
-            "    sys.stdout.buffer.flush()",
+            r"    sys.stdout.write(json.dumps(message) + '\n')",
+            "    sys.stdout.flush()",
             "",
             "while True:",
             "    request = read_message()",
@@ -1788,6 +1846,7 @@ mod tests {
         script_path
     }
 
+    #[cfg(unix)]
     fn sample_bootstrap(script_path: &Path) -> McpClientBootstrap {
         let config = ScopedMcpServerConfig {
             required: false,
@@ -1811,7 +1870,7 @@ mod tests {
         env: BTreeMap<String, String>,
     ) -> crate::mcp_client::McpStdioTransport {
         crate::mcp_client::McpStdioTransport {
-            command: "python3".to_string(),
+            command: python_command().to_string(),
             args: vec![script_path.to_string_lossy().into_owned()],
             env,
             tool_call_timeout_ms: None,
@@ -1861,7 +1920,7 @@ mod tests {
             required: false,
             scope: ConfigSource::Local,
             config: McpServerConfig::Stdio(McpStdioServerConfig {
-                command: "python3".to_string(),
+                command: python_command().to_string(),
                 args: vec![script_path.to_string_lossy().into_owned()],
                 env,
                 tool_call_timeout_ms: None,
@@ -1869,6 +1928,9 @@ mod tests {
         }
     }
 
+    /// Uses a `#!/bin/sh` stub, so it is POSIX-only. The same transport plumbing is
+    /// covered cross-platform by the Python-stub tests below.
+    #[cfg(unix)]
     #[test]
     fn spawns_stdio_process_and_round_trips_io() {
         let runtime = Builder::new_current_thread()
@@ -1960,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn write_jsonrpc_request_emits_content_length_frame() {
+    fn write_jsonrpc_request_emits_newline_delimited_json() {
         let runtime = Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1993,18 +2055,18 @@ mod tests {
         });
     }
 
+    /// Servers launched via wrappers (`npx`, `uvx`, shell shims) routinely leak
+    /// non-JSON noise onto stdout. Treating that as a protocol error would kill
+    /// otherwise-healthy sessions, so the reader must skip it and find the response.
     #[test]
-    fn given_lowercase_content_length_when_initialize_then_response_parses() {
+    fn given_non_json_noise_on_stdout_when_initialize_then_response_still_parses() {
         let runtime = Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let script_path = write_jsonrpc_script();
-            let transport = script_transport_with_env(
-                &script_path,
-                BTreeMap::from([("MCP_LOWERCASE_CONTENT_LENGTH".to_string(), "1".to_string())]),
-            );
+            let script_path = write_noisy_jsonrpc_script();
+            let transport = script_transport(&script_path);
             let mut process = McpStdioProcess::spawn(&transport).expect("spawn transport directly");
 
             let response = process
@@ -2020,7 +2082,7 @@ mod tests {
                     },
                 )
                 .await
-                .expect("initialize roundtrip");
+                .expect("initialize roundtrip despite stdout noise");
 
             assert_eq!(response.id, JsonRpcId::Number(8));
             assert_eq!(response.error, None);
@@ -2072,6 +2134,9 @@ mod tests {
         });
     }
 
+    /// Hard-codes `/bin/sh`, so it is POSIX-only. Env plumbing is also exercised
+    /// cross-platform by the Python-stub manager tests.
+    #[cfg(unix)]
     #[test]
     fn direct_spawn_uses_transport_env() {
         let runtime = Builder::new_current_thread()
@@ -2341,7 +2406,7 @@ mod tests {
                     required: false,
                     scope: ConfigSource::Local,
                     config: McpServerConfig::Stdio(McpStdioServerConfig {
-                        command: "python3".to_string(),
+                        command: python_command().to_string(),
                         args: vec![script_path.to_string_lossy().into_owned()],
                         env: BTreeMap::from([(
                             "MCP_TOOL_CALL_DELAY_MS".to_string(),
@@ -2395,7 +2460,7 @@ mod tests {
                     required: false,
                     scope: ConfigSource::Local,
                     config: McpServerConfig::Stdio(McpStdioServerConfig {
-                        command: "python3".to_string(),
+                        command: python_command().to_string(),
                         args: vec![script_path.to_string_lossy().into_owned()],
                         env: BTreeMap::from([(
                             "MCP_INVALID_TOOL_CALL_RESPONSE".to_string(),
@@ -2424,8 +2489,12 @@ mod tests {
                 } => {
                     assert_eq!(server_name, "broken");
                     assert_eq!(method, "tools/call");
+                    // The stub emits well-formed JSON that is not a JSON-RPC
+                    // response, so serde reports the missing envelope field rather
+                    // than a lexical error.
                     assert!(
-                        details.contains("expected ident") || details.contains("expected value")
+                        details.contains("missing field") || details.contains("expected value"),
+                        "unexpected parse-error detail: {details}"
                     );
                 }
                 other => panic!("expected invalid response error, got {other:?}"),
@@ -2688,19 +2757,14 @@ mod tests {
         let script_path = root.join("initialize-disconnect.py");
         let script = [
             "#!/usr/bin/env python3",
-            "import sys",
-            "header = b''",
-            r"while not header.endswith(b'\r\n\r\n'):",
-            "    chunk = sys.stdin.buffer.read(1)",
-            "    if not chunk:",
-            "        raise SystemExit(1)",
-            "    header += chunk",
-            "length = 0",
-            r"for line in header.decode().split('\r\n'):",
-            r"    if line.lower().startswith('content-length:'):",
-            r"        length = int(line.split(':', 1)[1].strip())",
-            "if length:",
-            "    sys.stdin.buffer.read(length)",
+            "import sys, time",
+            "# Consume the initialize request, then close stdout without answering.",
+            "# The process deliberately stays alive so the client observes a clean EOF",
+            "# mid-handshake rather than racing the child's exit, which would surface as",
+            "# a spawn-phase error instead of the initialize-phase failure under test.",
+            "sys.stdin.readline()",
+            "sys.stdout.close()",
+            "time.sleep(30)",
             "raise SystemExit(0)",
             "",
         ]
@@ -2732,8 +2796,8 @@ mod tests {
                         required: true,
                         scope: ConfigSource::Local,
                         config: McpServerConfig::Stdio(McpStdioServerConfig {
-                            command: broken_script_path.display().to_string(),
-                            args: Vec::new(),
+                            command: python_command().to_string(),
+                            args: vec![broken_script_path.display().to_string()],
                             env: BTreeMap::new(),
                             tool_call_timeout_ms: None,
                         }),

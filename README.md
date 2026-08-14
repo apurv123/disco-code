@@ -50,7 +50,30 @@ stays one turn while `clean this up` earns the full pipeline. Run
 `claw enhance "<request>"` to see the decision without spending any inference,
 or pass `--enhance` to a normal run to use it.
 
-## Requirements
+## Tools and MCP
+
+Alongside its built-in tools (file read/write/edit, `grep`, `glob`, shell,
+`WebSearch`, `WebFetch`), Disco Code speaks the Model Context Protocol, so any
+MCP server can be added as a tool source.
+
+Declare servers under `mcpServers` in `.claw/settings.json` (project) or
+`settings.local.json` (untracked, local overrides):
+
+```json
+{
+  "mcpServers": {
+    "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp@latest"] }
+  }
+}
+```
+
+Then `claw mcp` lists what is configured and `claw mcp show <server>` prints one
+server's resolved settings. Discovered tools are namespaced per server
+(`mcp__playwright__browser_navigate`), so they cannot collide with built-ins.
+
+Discovery is best-effort by design: a server that fails to start is reported and
+the session continues with everything else, rather than failing the run.
+
 
 - [Ollama](https://ollama.com), running, with at least one model pulled
 - Rust 1.90 or newer (to build from source)
@@ -90,7 +113,7 @@ cd crates/desktop && cargo tauri build
 | C | Egress policy enforcement | done |
 | D | Prompt-enhancement pipeline tuned for local models | done |
 | E | Tauri desktop shell and interface layer | done |
-| F | Tooling: MCP, web search, code search | planned |
+| F | Tooling: MCP, web search, code search | done |
 
 ## License
 
