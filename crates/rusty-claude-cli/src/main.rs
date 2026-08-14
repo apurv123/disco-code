@@ -7090,7 +7090,7 @@ struct RuntimeMcpState {
 }
 
 struct BuiltRuntime {
-    runtime: Option<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>>,
+    runtime: Option<ConversationRuntime<OllamaRuntimeClient, CliToolExecutor>>,
     plugin_registry: PluginRegistry,
     plugins_active: bool,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
@@ -7099,7 +7099,7 @@ struct BuiltRuntime {
 
 impl BuiltRuntime {
     fn new(
-        runtime: ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>,
+        runtime: ConversationRuntime<OllamaRuntimeClient, CliToolExecutor>,
         plugin_registry: PluginRegistry,
         mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     ) -> Self {
@@ -7144,7 +7144,7 @@ impl BuiltRuntime {
 }
 
 impl Deref for BuiltRuntime {
-    type Target = ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>;
+    type Target = ConversationRuntime<OllamaRuntimeClient, CliToolExecutor>;
 
     fn deref(&self) -> &Self::Target {
         self.runtime
@@ -12488,7 +12488,7 @@ fn build_runtime_with_plugin_state(
         .map_err(std::io::Error::other)?;
     let mut runtime = ConversationRuntime::new_with_features(
         session,
-        AnthropicRuntimeClient::new(
+        OllamaRuntimeClient::new(
             session_id,
             model,
             enable_tools,
@@ -12595,13 +12595,12 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
     }
 }
 
-// NOTE: Despite the historical name `AnthropicRuntimeClient`, this struct
-// now holds an `ApiProviderClient` which dispatches to Anthropic, xAI,
-// OpenAI, or DashScope at construction time based on
-// `detect_provider_kind(&model)`. The struct name is kept to avoid
-// churning `BuiltRuntime` and every Deref/DerefMut site that references
-// it. See ROADMAP #29 for the provider-dispatch routing fix.
-struct AnthropicRuntimeClient {
+/// Bridges the conversation runtime to the Ollama daemon.
+///
+/// Owns the tokio runtime the blocking CLI uses to drive async inference, plus
+/// the per-turn state (model, tool registry, allowed-tool filter) the runtime
+/// needs on each request.
+struct OllamaRuntimeClient {
     runtime: tokio::runtime::Runtime,
     client: ApiProviderClient,
     session_id: String,
@@ -12614,7 +12613,7 @@ struct AnthropicRuntimeClient {
     reasoning_effort: Option<String>,
 }
 
-impl AnthropicRuntimeClient {
+impl OllamaRuntimeClient {
     fn new(
         session_id: &str,
         model: String,
@@ -12656,7 +12655,7 @@ impl AnthropicRuntimeClient {
     }
 }
 
-impl ApiClient for AnthropicRuntimeClient {
+impl ApiClient for OllamaRuntimeClient {
     #[allow(clippy::too_many_lines)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         if let Some(progress_reporter) = &self.progress_reporter {
@@ -12706,7 +12705,7 @@ impl ApiClient for AnthropicRuntimeClient {
     }
 }
 
-impl AnthropicRuntimeClient {
+impl OllamaRuntimeClient {
     /// Consume a single streaming response, optionally applying a stall
     /// timeout on the first event for post-tool continuations.
     #[allow(clippy::too_many_lines)]
@@ -14318,7 +14317,8 @@ mod tests {
         resolve_session_reference, response_to_events, resume_supported_slash_commands,
         run_resume_command, short_tool_id, slash_command_completion_candidates_with_sessions,
         split_error_hint, status_context, status_json_value, summarize_tool_payload_for_markdown,
-        try_resolve_bare_skill_prompt, validate_no_args, write_mcp_server_fixture, CliAction,
+        try_resolve_bare_skill_prompt, validate_no_args, python_command, write_mcp_server_fixture,
+        CliAction,
         CliOutputFormat, CliToolExecutor, GitOperation, GitWorkspaceSummary,
         InternalPromptProgressEvent, InternalPromptProgressState, LiveCli, LocalHelpTopic,
         PermissionModeProvenance, PromptHistoryEntry, SessionLifecycleKind,
@@ -15878,7 +15878,16 @@ mod tests {
 
         // Phase 1 contract: workspace/git/sandbox fields are still populated
         // (independent of config parse). Sandbox falls back to defaults.
-        assert_eq!(context.cwd, cwd.canonicalize().unwrap_or(cwd.clone()));
+        // `canonicalize()` returns a `\\?\`-prefixed verbatim path on Windows,
+        // while `context.cwd` carries the plain user-facing form. Compare the
+        // normalized strings so the assertion is meaningful on both platforms.
+        let expected_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+        let normalize = |p: &Path| {
+            p.to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .to_string()
+        };
+        assert_eq!(normalize(&context.cwd), normalize(&expected_cwd));
         assert_eq!(
             context.loaded_config_files, 0,
             "loaded_config_files should be 0 when config parse fails"
@@ -16375,7 +16384,7 @@ mod tests {
         // #765: removed auth subcommands must classify as removed_subcommand
         assert_eq!(
             classify_error_kind(
-                "`claw login` has been removed.\nSet ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN instead."
+                "`claw login` has been removed.\nDisco Code runs against a local Ollama daemon and needs no login."
             ),
             "removed_subcommand"
         );
@@ -16388,7 +16397,7 @@ mod tests {
         );
         assert_eq!(
             classify_error_kind(
-                "`claw logout` has been removed.\nSet ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN instead."
+                "`claw logout` has been removed.\nDisco Code runs against a local Ollama daemon and needs no login."
             ),
             "removed_subcommand"
         );
@@ -19148,21 +19157,19 @@ UU conflicted.rs",
         write_mcp_server_fixture(&script_path);
         fs::write(
             config_home.join("settings.json"),
-            format!(
-                r#"{{
-                  "mcpServers": {{
-                    "alpha": {{
-                      "command": "python3",
-                      "args": ["{}"]
-                    }},
-                    "broken": {{
-                      "command": "python3",
-                      "args": ["-c", "import sys; sys.exit(0)"]
-                    }}
-                  }}
-                }}"#,
-                script_path.to_string_lossy()
-            ),
+            serde_json::json!({
+                "mcpServers": {
+                    "alpha": {
+                        "command": python_command(),
+                        "args": [script_path.to_string_lossy()]
+                    },
+                    "broken": {
+                        "command": python_command(),
+                        "args": ["-c", "import sys; sys.exit(0)"]
+                    }
+                }
+            })
+            .to_string(),
         )
         .expect("write mcp settings");
 
@@ -19445,29 +19452,34 @@ UU conflicted.rs",
     }
 }
 
+/// Python interpreter name for test fixtures. Windows has no `python3` on PATH
+/// (the name resolves to a Microsoft Store alias shim that fails to spawn), so
+/// the launcher must be `python` there.
+fn python_command() -> &'static str {
+    if cfg!(windows) {
+        "python"
+    } else {
+        "python3"
+    }
+}
+
 fn write_mcp_server_fixture(script_path: &Path) {
     let script = [
             "#!/usr/bin/env python3",
             "import json, sys",
             "",
             "def read_message():",
-            "    header = b''",
-            r"    while not header.endswith(b'\r\n\r\n'):",
-            "        chunk = sys.stdin.buffer.read(1)",
-            "        if not chunk:",
-            "            return None",
-            "        header += chunk",
-            "    length = 0",
-            r"    for line in header.decode().split('\r\n'):",
-            r"        if line.lower().startswith('content-length:'):",
-            "            length = int(line.split(':', 1)[1].strip())",
-            "    payload = sys.stdin.buffer.read(length)",
-            "    return json.loads(payload.decode())",
+            "    line = sys.stdin.readline()",
+            "    if not line:",
+            "        return None",
+            "    line = line.strip()",
+            "    if not line:",
+            "        return read_message()",
+            "    return json.loads(line)",
             "",
             "def send_message(message):",
-            "    payload = json.dumps(message).encode()",
-            r"    sys.stdout.buffer.write(f'Content-Length: {len(payload)}\r\n\r\n'.encode() + payload)",
-            "    sys.stdout.buffer.flush()",
+            "    sys.stdout.write(json.dumps(message) + '\\n')",
+            "    sys.stdout.flush()",
             "",
             "while True:",
             "    request = read_message()",
