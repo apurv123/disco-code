@@ -47,7 +47,7 @@ fn compact_subcommand_json_fails_fast_when_stdin_closed() {
         parsed["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("claw compact"),
+            .contains("disco compact"),
         "message should name compact: {parsed}"
     );
     // #749: hint must be non-empty (was null before fix — same class as #738/#745/#746)
@@ -95,7 +95,7 @@ fn compact_subcommand_text_fails_fast_when_stdin_closed() {
         stderr.contains("[error-kind: interactive_only]"),
         "{stderr}"
     );
-    assert!(stderr.contains("claw compact"), "{stderr}");
+    assert!(stderr.contains("disco compact"), "{stderr}");
 
     fs::remove_dir_all(&workspace).expect("workspace cleanup should succeed");
 }
@@ -107,7 +107,7 @@ fn run_claw_closed_stdin_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_claw"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_disco"))
         .current_dir(cwd)
         .env_clear()
         .env("CLAW_CONFIG_HOME", config_home)
@@ -119,7 +119,7 @@ fn run_claw_closed_stdin_with_timeout(
         .stderr(Stdio::piped())
         .args(args)
         .spawn()
-        .expect("claw should launch");
+        .expect("disco should launch");
 
     let start = Instant::now();
     loop {
@@ -132,7 +132,7 @@ fn run_claw_closed_stdin_with_timeout(
                 .wait_with_output()
                 .expect("killed output should collect");
             panic!(
-                "claw did not exit within {:?}\nstdout:\n{}\nstderr:\n{}",
+                "disco did not exit within {:?}\nstdout:\n{}\nstderr:\n{}",
                 timeout,
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)

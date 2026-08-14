@@ -47,7 +47,7 @@ pub fn run_setup_wizard() -> Result<(), Box<dyn std::error::Error>> {
         );
     } else {
         println!(
-            "  Run \x1b[1m/model {}\x1b[0m or restart claw to activate.",
+            "  Run \x1b[1m/model {}\x1b[0m or restart disco to activate.",
             model.as_deref().unwrap_or(available.as_str())
         );
     }
