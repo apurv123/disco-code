@@ -1,0 +1,28 @@
+[package]
+name = "desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Disco Code desktop shell"
+
+# The binary is the installable product, so it carries the product name rather
+# than the crate name.
+[[bin]]
+name = "disco-code"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+api = { path = "../api" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+runtime = { path = "../runtime" }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

@@ -45,11 +45,39 @@ Version:   v1.18.10
 License:   MIT
 Copyright: (c) 2025 opencode
 
-Derived components are introduced in later phases and will be recorded here as
-they land, covering the user interface layer, session presentation, and
-supporting developer experience. opencode is TypeScript/SolidJS; Disco Code
-consumes its interface layer as the webview frontend of a Tauri shell while the
-Rust crates above remain the core.
+Derived components:
+
+    desktop-ui/src/themes/   Theme definitions (37 files, verbatim)
+
+Disco Code adopts opencode's design system and its SolidJS/Vite frontend stack.
+It deliberately does not adopt opencode's backend protocol.
+
+That boundary was chosen by measurement rather than preference. opencode's
+frontend reaches its backend through 56 HTTP endpoints whose payload shapes are
+generated from Effect schemas and whose handlers are the opencode TypeScript
+core: session model, event bus, permissions, PTY, and tool output store.
+Reproducing that surface in Rust would mean reimplementing opencode's core to
+byte-compatible JSON and then tracking it on every upstream release, for a
+product whose core already exists in Rust.
+
+The packages divide cleanly along that line, which is what made the split
+practical:
+
+    packages/ui           193 source files, zero imports of opencode's
+                          sdk, protocol, core, or Effect -- a presentation
+                          layer with no protocol coupling. Adopted.
+    packages/session-ui    93 files, 19 protocol-coupled.
+    packages/app          420 files, 123 protocol-coupled -- this is the
+                          HTTP client application itself. Not adopted.
+
+The theme files are the portion taken verbatim. They are pure data and carry no
+runtime dependency. The interface components are written against the Rust core's
+own IPC surface rather than copied, because the copied versions would have
+carried the protocol assumptions the split exists to avoid.
+
+opencode's own desktop application is Electron. Disco Code uses Tauri instead,
+so the interface is the platform webview rather than a bundled browser. This is
+a departure from opencode, not an inheritance from it.
 
 
 Upstream 3: oh-my-codex
