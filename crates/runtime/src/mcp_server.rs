@@ -17,7 +17,8 @@ use std::io;
 
 use serde_json::{json, Value as JsonValue};
 use tokio::io::{
-    stdin, stdout, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Stdin, Stdout,
+    stdin, stdout, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, Stdin,
+    Stdout,
 };
 
 use crate::mcp_stdio::{
@@ -242,64 +243,108 @@ fn invalid_params_response(id: JsonRpcId, message: &str) -> JsonRpcResponse<Json
     }
 }
 
-/// Reads a single LSP-framed JSON-RPC payload from `reader`.
+/// Reads a single newline-delimited JSON-RPC payload from `reader`.
 ///
-/// Returns `Ok(None)` on clean EOF before any header bytes have been read,
-/// matching how [`crate::mcp_stdio::McpStdioProcess`] treats stream closure.
-async fn read_frame(reader: &mut BufReader<Stdin>) -> io::Result<Option<Vec<u8>>> {
-    let mut content_length: Option<usize> = None;
-    let mut first_header = true;
+/// Returns `Ok(None)` on clean EOF, matching how
+/// [`crate::mcp_stdio::McpStdioProcess`] treats stream closure.
+///
+/// This previously parsed LSP-style `Content-Length` headers, which is not the
+/// framing the MCP stdio transport specifies. That made this server unusable by
+/// every spec-compliant MCP client, in exactly the same way the client half was
+/// unusable against real servers.
+async fn read_frame<R: AsyncBufRead + Unpin>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
     loop {
         let mut line = String::new();
         let bytes_read = reader.read_line(&mut line).await?;
         if bytes_read == 0 {
-            if first_header {
-                return Ok(None);
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "MCP stdio stream closed while reading headers",
-            ));
+            return Ok(None);
         }
-        first_header = false;
-        if line == "\r\n" || line == "\n" {
-            break;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
         }
-        let header = line.trim_end_matches(['\r', '\n']);
-        if let Some((name, value)) = header.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("Content-Length") {
-                let parsed = value
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                content_length = Some(parsed);
-            }
-        }
+        return Ok(Some(trimmed.as_bytes().to_vec()));
     }
-
-    let content_length = content_length.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "missing Content-Length header")
-    })?;
-    let mut payload = vec![0_u8; content_length];
-    reader.read_exact(&mut payload).await?;
-    Ok(Some(payload))
 }
 
-async fn write_response(
-    stdout: &mut Stdout,
+async fn write_response<W: AsyncWrite + Unpin>(
+    stdout: &mut W,
     response: &JsonRpcResponse<JsonValue>,
 ) -> io::Result<()> {
     let body = serde_json::to_vec(response)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    stdout.write_all(header.as_bytes()).await?;
     stdout.write_all(&body).await?;
+    stdout.write_all(b"\n").await?;
     stdout.flush().await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the MCP stdio wire format on the server half.
+    ///
+    /// This previously emitted LSP `Content-Length` headers. The existing tests all
+    /// exercised `dispatch` and never touched framing, so the incompatibility was
+    /// invisible; these assertions exist so it cannot regress silently again.
+    #[test]
+    fn write_response_emits_one_newline_delimited_json_object() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let response = JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: JsonRpcId::Number(1),
+                result: Some(serde_json::json!({"ok": true})),
+                error: None,
+            };
+
+            let mut buffer: Vec<u8> = Vec::new();
+            write_response(&mut buffer, &response)
+                .await
+                .expect("write response");
+
+            let written = String::from_utf8(buffer).expect("utf8");
+            assert!(
+                !written.to_ascii_lowercase().contains("content-length"),
+                "MCP stdio must not use LSP header framing, got {written:?}"
+            );
+            assert!(written.ends_with('\n'), "response must be newline-terminated");
+            assert_eq!(
+                written.matches('\n').count(),
+                1,
+                "response must occupy exactly one line, got {written:?}"
+            );
+            serde_json::from_str::<serde_json::Value>(written.trim()).expect("line is valid JSON");
+        });
+    }
+
+    #[test]
+    fn read_frame_reads_newline_delimited_json_and_skips_blank_lines() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let input = "\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n";
+            let mut reader = BufReader::new(input.as_bytes());
+
+            let payload = read_frame(&mut reader)
+                .await
+                .expect("read frame")
+                .expect("payload present");
+            let value: serde_json::Value =
+                serde_json::from_slice(&payload).expect("payload is JSON");
+            assert_eq!(value["method"], "initialize");
+
+            assert!(
+                read_frame(&mut reader).await.expect("read eof").is_none(),
+                "clean EOF must yield None, not an error"
+            );
+        });
+    }
 
     #[test]
     fn dispatch_initialize_returns_server_info() {
