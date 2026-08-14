@@ -16,7 +16,7 @@ Disco Code combines two MIT-licensed open source projects into one product:
   Rust core — session management, permissions and policy enforcement, sandboxing,
   MCP lifecycle, the tool suite, and the prompt-construction pipeline.
 - **[opencode](https://github.com/anomalyco/opencode)** contributes the
-  interface layer and developer experience.
+  design system and the shape of the interface layer.
 - **[oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex)** contributes the
   design of the staged prompt-enhancement harness.
 
@@ -54,12 +54,30 @@ or pass `--enhance` to a normal run to use it.
 
 - [Ollama](https://ollama.com), running, with at least one model pulled
 - Rust 1.90 or newer (to build from source)
+- Node.js 20 or newer (to build the desktop interface)
 
 ## Building
+
+The CLI and core:
 
 ```sh
 cargo build --workspace
 cargo test --workspace
+```
+
+The desktop app:
+
+```sh
+cd desktop-ui && npm install && cd ..
+cargo build -p desktop            # run it from target/
+cd crates/desktop && cargo tauri dev    # or develop with hot reload
+```
+
+To produce installers (`.msi` and `.exe` on Windows, `.dmg` on macOS,
+`.deb`/`.AppImage` on Linux):
+
+```sh
+cd crates/desktop && cargo tauri build
 ```
 
 ## Roadmap
@@ -71,7 +89,7 @@ cargo test --workspace
 | B2 | Removal of all hosted-provider code paths | done |
 | C | Egress policy enforcement | done |
 | D | Prompt-enhancement pipeline tuned for local models | done |
-| E | Tauri desktop shell and interface layer | planned |
+| E | Tauri desktop shell and interface layer | done |
 | F | Tooling: MCP, web search, code search | planned |
 
 ## License
