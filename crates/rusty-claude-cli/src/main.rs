@@ -36,7 +36,7 @@ use log::debug;
 
 use api::{
     detect_provider_kind, model_family_identity_for, ContentBlockDelta, InputContentBlock,
-    InputMessage, MessageRequest, MessageResponse, OutputContentBlock, PromptCache,
+    InputMessage, MessageRequest, MessageResponse, OutputContentBlock,
     ProviderClient as ApiProviderClient, ProviderKind, StreamEvent as ApiStreamEvent, ToolChoice,
     ToolDefinition, ToolResultContentBlock,
 };
@@ -59,7 +59,7 @@ use runtime::{
     CompactionConfig, ConfigFileReport, ConfigLoader, ConfigSource, ContentBlock, ContextFile,
     ConversationMessage, ConversationRuntime, McpConfigCollection, McpInvalidServerConfig,
     McpServer, McpServerManager, McpServerSpec, McpTool, MessageRole, ModelPricing, PermissionMode,
-    PermissionPolicy, ProjectContext, PromptCacheEvent, ResolvedPermissionMode, RuntimeError,
+    PermissionPolicy, ProjectContext, ResolvedPermissionMode, RuntimeError,
     RuntimeInvalidHookConfig, Session, TokenUsage, ToolError, ToolExecutor, UsageTracker,
 };
 use serde::Deserialize;
@@ -8068,7 +8068,6 @@ impl LiveCli {
                 })),
                 "tool_uses": collect_tool_uses(&summary),
                 "tool_results": collect_tool_results(&summary),
-                "prompt_cache_events": collect_prompt_cache_events(&summary),
                 "usage": {
                     "input_tokens": summary.usage.input_tokens,
                     "output_tokens": summary.usage.output_tokens,
@@ -12868,8 +12867,6 @@ impl OllamaRuntimeClient {
             }
         }
 
-        push_prompt_cache_record(&self.client, &mut events);
-
         if !saw_stop
             && events.iter().any(|event| {
                 matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
@@ -12896,9 +12893,7 @@ impl OllamaRuntimeClient {
             .map_err(|error| {
                 RuntimeError::new(format_user_visible_api_error(&self.session_id, &error))
             })?;
-        let mut events = response_to_events(response, out)?;
-        push_prompt_cache_record(&self.client, &mut events);
-        Ok(events)
+        response_to_events(response, out)
     }
 }
 
@@ -13112,22 +13107,6 @@ fn collect_tool_results(summary: &runtime::TurnSummary) -> Vec<serde_json::Value
                 "is_error": is_error,
             })),
             _ => None,
-        })
-        .collect()
-}
-
-fn collect_prompt_cache_events(summary: &runtime::TurnSummary) -> Vec<serde_json::Value> {
-    summary
-        .prompt_cache_events
-        .iter()
-        .map(|event| {
-            json!({
-                "unexpected": event.unexpected,
-                "reason": event.reason,
-                "previous_cache_read_input_tokens": event.previous_cache_read_input_tokens,
-                "current_cache_read_input_tokens": event.current_cache_read_input_tokens,
-                "token_drop": event.token_drop,
-            })
         })
         .collect()
 }
@@ -13857,32 +13836,6 @@ fn response_to_events(
     events.push(AssistantEvent::Usage(response.usage.token_usage()));
     events.push(AssistantEvent::MessageStop);
     Ok(events)
-}
-
-fn push_prompt_cache_record(client: &ApiProviderClient, events: &mut Vec<AssistantEvent>) {
-    // `ApiProviderClient::take_last_prompt_cache_record` is a pass-through
-    // to the Anthropic variant and returns `None` for OpenAI-compat /
-    // xAI variants, which do not have a prompt cache. So this helper
-    // remains a no-op on non-Anthropic providers without any extra
-    // branching here.
-    if let Some(record) = client.take_last_prompt_cache_record() {
-        if let Some(event) = prompt_cache_record_to_runtime_event(record) {
-            events.push(AssistantEvent::PromptCache(event));
-        }
-    }
-}
-
-fn prompt_cache_record_to_runtime_event(
-    record: api::PromptCacheRecord,
-) -> Option<PromptCacheEvent> {
-    let cache_break = record.cache_break?;
-    Some(PromptCacheEvent {
-        unexpected: cache_break.unexpected,
-        reason: cache_break.reason,
-        previous_cache_read_input_tokens: cache_break.previous_cache_read_input_tokens,
-        current_cache_read_input_tokens: cache_break.current_cache_read_input_tokens,
-        token_drop: cache_break.token_drop,
-    })
 }
 
 struct CliToolExecutor {

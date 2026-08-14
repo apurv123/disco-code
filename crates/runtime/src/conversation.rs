@@ -39,18 +39,7 @@ pub enum AssistantEvent {
         input: String,
     },
     Usage(TokenUsage),
-    PromptCache(PromptCacheEvent),
     MessageStop,
-}
-
-/// Prompt-cache telemetry captured from the provider response stream.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PromptCacheEvent {
-    pub unexpected: bool,
-    pub reason: String,
-    pub previous_cache_read_input_tokens: u32,
-    pub current_cache_read_input_tokens: u32,
-    pub token_drop: u32,
 }
 
 /// Minimal streaming API contract required by [`ConversationRuntime`].
@@ -114,7 +103,6 @@ impl std::error::Error for RuntimeError {}
 pub struct TurnSummary {
     pub assistant_messages: Vec<ConversationMessage>,
     pub tool_results: Vec<ConversationMessage>,
-    pub prompt_cache_events: Vec<PromptCacheEvent>,
     pub iterations: usize,
     pub usage: TokenUsage,
     pub auto_compaction: Option<AutoCompactionEvent>,
@@ -347,7 +335,6 @@ where
 
         let mut assistant_messages = Vec::new();
         let mut tool_results = Vec::new();
-        let mut prompt_cache_events = Vec::new();
         let mut iterations = 0;
         let mut auto_compaction = None;
 
@@ -372,7 +359,7 @@ where
                     return Err(error);
                 }
             };
-            let (assistant_message, usage, turn_prompt_cache_events) =
+            let (assistant_message, usage) =
                 match build_assistant_message(events) {
                     Ok(result) => result,
                     Err(error) => {
@@ -383,7 +370,6 @@ where
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
             }
-            prompt_cache_events.extend(turn_prompt_cache_events);
             let pending_tool_uses = assistant_message
                 .blocks
                 .iter()
@@ -520,7 +506,6 @@ where
         let summary = TurnSummary {
             assistant_messages,
             tool_results,
-            prompt_cache_events,
             iterations,
             usage: self.usage_tracker.cumulative_usage(),
             auto_compaction,
@@ -682,10 +667,6 @@ where
             "tool_results".to_string(),
             Value::from(summary.tool_results.len() as u64),
         );
-        attributes.insert(
-            "prompt_cache_events".to_string(),
-            Value::from(summary.prompt_cache_events.len() as u64),
-        );
         session_tracer.record("turn_completed", attributes);
     }
 
@@ -721,17 +702,9 @@ fn parse_auto_compaction_threshold(value: Option<&str>) -> u32 {
 
 fn build_assistant_message(
     events: Vec<AssistantEvent>,
-) -> Result<
-    (
-        ConversationMessage,
-        Option<TokenUsage>,
-        Vec<PromptCacheEvent>,
-    ),
-    RuntimeError,
-> {
+) -> Result<(ConversationMessage, Option<TokenUsage>), RuntimeError> {
     let mut text = String::new();
     let mut blocks = Vec::new();
-    let mut prompt_cache_events = Vec::new();
     let mut finished = false;
     let mut usage = None;
 
@@ -753,7 +726,6 @@ fn build_assistant_message(
                 blocks.push(ContentBlock::ToolUse { id, name, input });
             }
             AssistantEvent::Usage(value) => usage = Some(value),
-            AssistantEvent::PromptCache(event) => prompt_cache_events.push(event),
             AssistantEvent::MessageStop => {
                 finished = true;
             }
@@ -774,7 +746,6 @@ fn build_assistant_message(
     Ok((
         ConversationMessage::assistant_with_usage(blocks, usage),
         usage,
-        prompt_cache_events,
     ))
 }
 
@@ -849,7 +820,7 @@ impl ToolExecutor for StaticToolExecutor {
 mod tests {
     use super::{
         build_assistant_message, parse_auto_compaction_threshold, ApiClient, ApiRequest,
-        AssistantEvent, AutoCompactionEvent, ConversationRuntime, PromptCacheEvent, RuntimeError,
+        AssistantEvent, AutoCompactionEvent, ConversationRuntime, RuntimeError,
         StaticToolExecutor, ToolExecutor, DEFAULT_AUTO_COMPACTION_INPUT_TOKENS_THRESHOLD,
     };
     use crate::compact::CompactionConfig;
@@ -911,15 +882,6 @@ mod tests {
                             cache_creation_input_tokens: 1,
                             cache_read_input_tokens: 3,
                         }),
-                        AssistantEvent::PromptCache(PromptCacheEvent {
-                            unexpected: true,
-                            reason:
-                                "cache read tokens dropped while prompt fingerprint remained stable"
-                                    .to_string(),
-                            previous_cache_read_input_tokens: 6_000,
-                            current_cache_read_input_tokens: 1_000,
-                            token_drop: 5_000,
-                        }),
                         AssistantEvent::MessageStop,
                     ])
                 }
@@ -974,7 +936,6 @@ mod tests {
         assert_eq!(summary.iterations, 2);
         assert_eq!(summary.assistant_messages.len(), 2);
         assert_eq!(summary.tool_results.len(), 1);
-        assert_eq!(summary.prompt_cache_events.len(), 1);
         assert_eq!(runtime.session().messages.len(), 4);
         assert_eq!(summary.usage.output_tokens, 10);
         assert_eq!(summary.auto_compaction, None);
@@ -1767,7 +1728,7 @@ mod tests {
         ];
 
         // when
-        let (message, _, _) = build_assistant_message(events)
+        let (message, _) = build_assistant_message(events)
             .expect("assistant message should preserve thinking, text, and tool blocks");
 
         // then
