@@ -1,5 +1,6 @@
 import { createEffect, createResource, createSignal, For, Show, onMount } from "solid-js"
 import {
+  cancelTurn,
   daemonStatus,
   sendPrompt,
   triageRequest,
@@ -31,6 +32,9 @@ export default function App() {
   const [status, { refetch }] = createResource(daemonStatus)
   const [model, setModel] = createSignal("")
   const [enhance, setEnhance] = createSignal(true)
+  // Off by default: a measured one-word answer cost 40.5s with reasoning on and
+  // 1.0s with it off, and the scratchpad is never shown.
+  const [reasoning, setReasoning] = createSignal(false)
   const [draft, setDraft] = createSignal("")
   const [entries, setEntries] = createSignal<Entry[]>([])
   const [running, setRunning] = createSignal(false)
@@ -135,11 +139,15 @@ export default function App() {
           break
         case "done":
           break
+        case "cancelled":
+          setEntries((prev) => [...prev, { role: "error", text: "Stopped." }])
+          scrollDown()
+          break
       }
     }
 
     try {
-      await sendPrompt(request, model(), enhance(), onEvent)
+      await sendPrompt(request, model(), enhance(), reasoning(), onEvent)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setEntries((prev) => [...prev, { role: "error", text: message }])
@@ -220,6 +228,21 @@ export default function App() {
             <span class="toggle-copy">
               Route requests through the staged harness. Simple edits still run
               as a single turn.
+            </span>
+          </label>
+        </div>
+
+        <div>
+          <div class="section-label">Reasoning</div>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              checked={reasoning()}
+              onChange={(event) => setReasoning(event.currentTarget.checked)}
+            />
+            <span class="toggle-copy">
+              Let the model think before answering. Much slower - its scratchpad
+              costs the same time as the answer, and is never displayed.
             </span>
           </label>
         </div>
@@ -347,10 +370,26 @@ export default function App() {
             onKeyDown={onKeyDown}
           />
           <button
-            onClick={() => void submit()}
-            disabled={running() || !draft().trim() || !status()?.reachable}
+            class={running() ? "iconbtn stop" : "iconbtn send"}
+            title={running() ? "Stop generating" : "Send"}
+            aria-label={running() ? "Stop generating" : "Send"}
+            onClick={() => (running() ? void cancelTurn() : void submit())}
+            disabled={
+              !status()?.reachable || (!running() && !draft().trim())
+            }
           >
-            {running() ? "Running" : "Send"}
+            <Show
+              when={running()}
+              fallback={
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                  <path d="M8 5v14l11-7z" fill="currentColor" />
+                </svg>
+              }
+            >
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" />
+              </svg>
+            </Show>
           </button>
         </div>
       </main>

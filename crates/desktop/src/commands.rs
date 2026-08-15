@@ -11,6 +11,42 @@
 //! presentation layer, which carries no protocol coupling.
 
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+
+/// The cancel flag for the turn currently in flight.
+///
+/// A local model can spend minutes in a hidden scratchpad, so a turn that
+/// cannot be abandoned is a turn that holds the interface hostage. The flag is
+/// checked between stream events, which is the only place the work is
+/// interruptible without killing the daemon's own generation.
+fn cancel_flag() -> &'static Mutex<Option<Arc<AtomicBool>>> {
+    static FLAG: OnceLock<Mutex<Option<Arc<AtomicBool>>>> = OnceLock::new();
+    FLAG.get_or_init(|| Mutex::new(None))
+}
+
+/// Begin a turn, replacing (and implicitly cancelling) any previous one.
+fn begin_turn() -> Arc<AtomicBool> {
+    let token = Arc::new(AtomicBool::new(false));
+    if let Ok(mut slot) = cancel_flag().lock() {
+        if let Some(previous) = slot.replace(Arc::clone(&token)) {
+            previous.store(true, Ordering::SeqCst);
+        }
+    }
+    token
+}
+
+/// Ask the running turn to stop at the next stream event.
+#[tauri::command]
+pub fn cancel_turn() {
+    if let Ok(slot) = cancel_flag().lock() {
+        if let Some(token) = slot.as_ref() {
+            token.store(true, Ordering::SeqCst);
+        }
+    }
+}
 
 /// A model the local daemon can serve, flattened for the webview.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -152,6 +188,8 @@ pub enum TurnEvent {
     Done,
     /// The run failed. Carries the reason rather than a bare failure.
     Failed { message: String },
+    /// The run was abandoned at the user's request.
+    Cancelled,
 }
 
 /// Run a request against the local daemon, streaming output to the webview.
@@ -168,8 +206,10 @@ pub async fn send_prompt(
     request: String,
     model: String,
     enhance: bool,
+    reasoning: bool,
 ) -> Result<(), String> {
     let _ = &app;
+    let cancel = begin_turn();
 
     let stages: Vec<runtime::enhance::Stage> = if enhance {
         runtime::enhance::triage(&request).stages
@@ -181,13 +221,19 @@ pub async fn send_prompt(
     let client = api::ProviderClient::from_model(&model).map_err(|error| error.to_string())?;
 
     if stages.is_empty() {
-        stream_once(&client, &model, &request, &channel, None, 0, 1).await?;
+        stream_once(
+            &client, &model, &request, &channel, None, 0, 1, reasoning, &cancel,
+        )
+        .await?;
         return Ok(());
     }
 
     let total = stages.len();
     let mut carry: Vec<(runtime::enhance::Stage, String)> = Vec::new();
     for (index, stage) in stages.iter().enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
         let rendered = prompt.render_stage(*stage, &carry);
         let produced = stream_once(
             &client,
@@ -197,6 +243,8 @@ pub async fn send_prompt(
             Some(stage.label()),
             index,
             total,
+            reasoning,
+            &cancel,
         )
         .await?;
         carry.push((*stage, produced));
@@ -218,6 +266,8 @@ async fn stream_once(
     stage: Option<&str>,
     index: usize,
     total: usize,
+    reasoning: bool,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<String, String> {
     if let Some(label) = stage {
         let _ = channel.send(TurnEvent::StageStart {
@@ -227,11 +277,20 @@ async fn stream_once(
         });
     }
 
+    // Measured on a local 9.7B model: the same one-word answer took 40.5s with
+    // reasoning left on and 1.0s with `reasoning_effort: none`, because the
+    // scratchpad is billed at the same tokens-per-second as the answer. The
+    // scratchpad is never displayed, so paying for it must be a deliberate act.
     let request = api::MessageRequest {
         model: model.to_string(),
         max_tokens: 4096,
         messages: vec![api::InputMessage::user_text(prompt)],
         stream: true,
+        reasoning_effort: if reasoning {
+            None
+        } else {
+            Some("none".to_string())
+        },
         ..Default::default()
     };
 
@@ -248,6 +307,10 @@ async fn stream_once(
 
     let mut collected = String::new();
     loop {
+        if cancel.load(Ordering::SeqCst) {
+            let _ = channel.send(TurnEvent::Cancelled);
+            return Ok(collected);
+        }
         match stream.next_event().await {
             Ok(Some(event)) => {
                 if let api::StreamEvent::ContentBlockDelta(delta) = event {
