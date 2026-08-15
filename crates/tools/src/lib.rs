@@ -29,7 +29,7 @@ use runtime::{
     BashCommandOutput, BranchFreshness, ConfigLoader, ContentBlock, ConversationMessage,
     ConversationRuntime, GrepSearchInput, LaneCommitProvenance, LaneEvent, LaneEventBlocker,
     LaneEventName, LaneEventStatus, LaneFailureClass, McpDegradedReport, MessageRole,
-    PermissionMode, PermissionPolicy, PromptCacheEvent, ProviderFallbackConfig, RuntimeError,
+    PermissionMode, PermissionPolicy, ProviderFallbackConfig, RuntimeError,
     Session, TaskPacket, ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
@@ -5313,8 +5313,6 @@ async fn stream_with_provider(
         }
     }
 
-    push_prompt_cache_record(client, &mut events);
-
     if !saw_stop
         && events.iter().any(|event| {
             matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
@@ -5337,9 +5335,7 @@ async fn stream_with_provider(
             ..message_request.clone()
         })
         .await?;
-    let mut events = response_to_events(response);
-    push_prompt_cache_record(client, &mut events);
-    Ok(events)
+    Ok(response_to_events(response))
 }
 
 struct SubagentToolExecutor {
@@ -5504,27 +5500,6 @@ fn response_to_events(response: MessageResponse) -> Vec<AssistantEvent> {
     events.push(AssistantEvent::Usage(response.usage.token_usage()));
     events.push(AssistantEvent::MessageStop);
     events
-}
-
-fn push_prompt_cache_record(client: &ProviderClient, events: &mut Vec<AssistantEvent>) {
-    if let Some(record) = client.take_last_prompt_cache_record() {
-        if let Some(event) = prompt_cache_record_to_runtime_event(record) {
-            events.push(AssistantEvent::PromptCache(event));
-        }
-    }
-}
-
-fn prompt_cache_record_to_runtime_event(
-    record: api::PromptCacheRecord,
-) -> Option<PromptCacheEvent> {
-    let cache_break = record.cache_break?;
-    Some(PromptCacheEvent {
-        unexpected: cache_break.unexpected,
-        reason: cache_break.reason,
-        previous_cache_read_input_tokens: cache_break.previous_cache_read_input_tokens,
-        current_cache_read_input_tokens: cache_break.current_cache_read_input_tokens,
-        token_drop: cache_break.token_drop,
-    })
 }
 
 fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
@@ -6825,7 +6800,6 @@ fn parse_skill_description(contents: &str) -> Option<String> {
     None
 }
 
-pub mod lane_completion;
 pub mod pdf_extract;
 
 #[cfg(test)]

@@ -16,6 +16,7 @@ fn main() {
             commands::daemon_status,
             commands::triage_request,
             commands::send_prompt,
+            commands::cancel_turn,
         ])
         .run(tauri::generate_context!())
         .expect("the desktop shell failed to start");

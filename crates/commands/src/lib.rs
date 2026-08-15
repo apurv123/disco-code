@@ -2453,7 +2453,7 @@ pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
             if filter.starts_with('-') {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("unknown option for `agents list`: {filter}\nUsage: claw agents list [<filter>]\nFilters are name substrings, not flags."),
+                    format!("unknown option for `agents list`: {filter}\nUsage: disco agents list [<filter>]\nFilters are name substrings, not flags."),
                 ));
             }
             let roots = discover_definition_roots(cwd, "agents");
@@ -2485,7 +2485,7 @@ pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
                 let extra = name_raw.split_once(' ').map(|(_, e)| e).unwrap_or("");
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("unexpected extra arguments after agent name\nUsage: claw agents show <name>\nUnexpected extra: '{extra}'"),
+                    format!("unexpected extra arguments after agent name\nUsage: disco agents show <name>\nUnexpected extra: '{extra}'"),
                 ));
             }
             let roots = discover_definition_roots(cwd, "agents");
@@ -2504,7 +2504,7 @@ pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
         }
         Some("create") => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "missing_argument: agents create requires an agent name.\nUsage: claw agents create <name>",
+            "missing_argument: agents create requires an agent name.\nUsage: disco agents create <name>",
         )),
         Some(args) if args.starts_with("create ") => {
             let mut parts = args.split_whitespace();
@@ -2512,13 +2512,13 @@ pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
             let Some(name) = parts.next() else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "missing_argument: agents create requires an agent name.\nUsage: claw agents create <name>",
+                    "missing_argument: agents create requires an agent name.\nUsage: disco agents create <name>",
                 ));
             };
             if let Some(extra) = parts.next() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("unexpected extra arguments after agent name\nUsage: claw agents create <name>\nUnexpected extra: '{extra}'"),
+                    format!("unexpected extra arguments after agent name\nUsage: disco agents create <name>\nUnexpected extra: '{extra}'"),
                 ));
             }
             let agent = create_agent(name, cwd)?;
@@ -2559,7 +2559,7 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                     "status": "error",
                     "error_kind": "unknown_option",
                     "unexpected": filter,
-                    "hint": "Usage: claw agents list [<filter>]\nFilters are name substrings, not flags.",
+                    "hint": "Usage: disco agents list [<filter>]\nFilters are name substrings, not flags.",
                 }));
             }
             let roots = discover_definition_roots(cwd, "agents");
@@ -2609,7 +2609,7 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                     "status": "error",
                     "error_kind": "unexpected_extra_args",
                     "unexpected": extra_token,
-                    "hint": format!("Usage: claw agents show <name>\nUnexpected extra: '{extra_token}'"),
+                    "hint": format!("Usage: disco agents show <name>\nUnexpected extra: '{extra_token}'"),
                 }));
             }
             let roots = discover_definition_roots(cwd, "agents");
@@ -2629,7 +2629,7 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                     // #734: parity with skills show which always emits a message field
                     "message": format!("agent '{}' not found", name),
                     // #760: hint so callers know how to enumerate available agents
-                    "hint": "Run `claw agents list` to see available agents.",
+                    "hint": "Run `disco agents list` to see available agents.",
                 }));
             }
             let matched_collection = AgentCollection {
@@ -2656,7 +2656,7 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                     "status": "error",
                     "error_kind": "unexpected_extra_args",
                     "unexpected": extra,
-                    "hint": format!("Usage: claw agents create <name>\nUnexpected extra: '{extra}'"),
+                    "hint": format!("Usage: disco agents create <name>\nUnexpected extra: '{extra}'"),
                 }));
             }
             match create_agent(name, cwd) {
@@ -2719,7 +2719,7 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
             if filter.starts_with('-') {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("unknown option for `skills list`: {filter}\nUsage: claw skills list [<filter>]\nFilters are name substrings, not flags."),
+                    format!("unknown option for `skills list`: {filter}\nUsage: disco skills list [<filter>]\nFilters are name substrings, not flags."),
                 ));
             }
             let roots = discover_skill_roots(cwd);
@@ -2751,7 +2751,7 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
                 let extra = name_raw.split_once(' ').map(|(_, e)| e).unwrap_or("");
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    format!("unexpected extra arguments after skill name\nUsage: claw skills show <name>\nUnexpected extra: '{extra}'"),
+                    format!("unexpected extra arguments after skill name\nUsage: disco skills show <name>\nUnexpected extra: '{extra}'"),
                 ));
             }
             let roots = discover_skill_roots(cwd);
@@ -2764,14 +2764,14 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
             if matched.is_empty() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
-                    format!("skill '{name_raw}' not found\nRun `claw skills list` to see available skills."),
+                    format!("skill '{name_raw}' not found\nRun `disco skills list` to see available skills."),
                 ));
             }
             Ok(render_skills_report(&matched))
         }
         Some("install") => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "missing_argument: skills install requires an install source.\nUsage: claw skills install <path>",
+            "missing_argument: skills install requires an install source.\nUsage: disco skills install <path>",
         )),
         // #95: support --project flag for project-level install
         Some(args) if args.starts_with("install ") => {
@@ -2784,7 +2784,7 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
             if target.is_empty() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "missing_argument: skills install requires an install source.\nUsage: claw skills install [--project] <path>",
+                    "missing_argument: skills install requires an install source.\nUsage: disco skills install [--project] <path>",
                 ));
             }
             let install = if project_flag {
@@ -2797,7 +2797,7 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
         }
         Some("uninstall" | "remove" | "delete") => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "missing_argument: skills uninstall requires a skill name.\nUsage: claw skills uninstall <name>",
+            "missing_argument: skills uninstall requires a skill name.\nUsage: disco skills uninstall <name>",
         )),
         Some(args)
             if args.starts_with("uninstall ")
@@ -2809,7 +2809,7 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
             if target.is_empty() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "missing_argument: skills uninstall requires a skill name.\nUsage: claw skills uninstall <name>",
+                    "missing_argument: skills uninstall requires a skill name.\nUsage: disco skills uninstall <name>",
                 ));
             }
             match uninstall_skill(target)? {
@@ -2821,7 +2821,7 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
                 } => Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!(
-                        "skill '{requested}' not found\nAvailable skills: {}\nRun `claw skills list` to see available skills.",
+                        "skill '{requested}' not found\nAvailable skills: {}\nRun `disco skills list` to see available skills.",
                         format_optional_list(&available_names)
                     ),
                 )),
@@ -2860,7 +2860,7 @@ pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                     "status": "error",
                     "error_kind": "unknown_option",
                     "unexpected": filter,
-                    "hint": "Usage: claw skills list [<filter>]\nFilters are name substrings, not flags.",
+                    "hint": "Usage: disco skills list [<filter>]\nFilters are name substrings, not flags.",
                 }));
             }
             let roots = discover_skill_roots(cwd);
@@ -2909,7 +2909,7 @@ pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                     "status": "error",
                     "error_kind": "unexpected_extra_args",
                     "unexpected": extra_token,
-                    "hint": format!("Usage: claw skills show <name>\nUnexpected extra: '{extra_token}'"),
+                    "hint": format!("Usage: disco skills show <name>\nUnexpected extra: '{extra_token}'"),
                 }));
             }
             let roots = discover_skill_roots(cwd);
@@ -2929,7 +2929,7 @@ pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                     "message": format!("skill '{}' not found", name),
                     "requested": name,
                     // #761: hint so callers know how to enumerate available skills
-                    "hint": "Run `claw skills list` to see available skills.",
+                    "hint": "Run `disco skills list` to see available skills.",
                 }));
             }
             let matched_collection = SkillCollection {
@@ -2944,7 +2944,7 @@ pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
         Some("install") => Ok(render_skills_missing_argument_json(
             "install",
             "install_source",
-            "Usage: claw skills install <path>",
+            "Usage: disco skills install <path>",
         )),
         // #95: support --project flag for project-level install
         Some(args) if args.starts_with("install ") => {
@@ -2958,7 +2958,7 @@ pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                 return Ok(render_skills_missing_argument_json(
                     "install",
                     "install_source",
-                    "Usage: claw skills install [--project] <path>",
+                    "Usage: disco skills install [--project] <path>",
                 ));
             }
             let result = if project_flag {
@@ -2975,7 +2975,7 @@ pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
         Some("uninstall" | "remove" | "delete") => Ok(render_skills_missing_argument_json(
             "uninstall",
             "skill_name",
-            "Usage: claw skills uninstall <name>",
+            "Usage: disco skills uninstall <name>",
         )),
         Some(args)
             if args.starts_with("uninstall ")
@@ -2988,7 +2988,7 @@ pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                 return Ok(render_skills_missing_argument_json(
                     "uninstall",
                     "skill_name",
-                    "Usage: claw skills uninstall <name>",
+                    "Usage: disco skills uninstall <name>",
                 ));
             }
             match uninstall_skill(target)? {
@@ -3178,7 +3178,7 @@ fn render_mcp_report_for(
             Err(err) => {
                 let empty = McpConfigCollection::default();
                 Ok(format!(
-                    "Config load error\n  Status           fail\n  Summary          runtime config failed to load; reporting partial MCP view\n  Details          {err}\n  Hint             `claw doctor` classifies config parse errors; fix the listed field and rerun\n\n{}",
+                    "Config load error\n  Status           fail\n  Summary          runtime config failed to load; reporting partial MCP view\n  Details          {err}\n  Hint             `disco doctor` classifies config parse errors; fix the listed field and rerun\n\n{}",
                     render_mcp_summary_report(cwd, &empty)
                 ))
             }
@@ -3204,7 +3204,7 @@ fn render_mcp_report_for(
                     runtime_config.mcp(),
                 )),
                 Err(err) => Ok(format!(
-                    "Config load error\n  Status           fail\n  Summary          runtime config failed to load; cannot resolve `{server_name}`\n  Details          {err}\n  Hint             `claw doctor` classifies config parse errors; fix the listed field and rerun"
+                    "Config load error\n  Status           fail\n  Summary          runtime config failed to load; cannot resolve `{server_name}`\n  Details          {err}\n  Hint             `disco doctor` classifies config parse errors; fix the listed field and rerun"
                 )),
             }
         }
@@ -3212,13 +3212,13 @@ fn render_mcp_report_for(
             // `mcp list <filter>` — list does not accept arguments; treat as unsupported action.
             Ok(render_mcp_unsupported_action_text(
                 args,
-                "list accepts no filter argument; use `claw mcp list`",
+                "list accepts no filter argument; use `disco mcp list`",
             ))
         }
         Some(args) if matches!(args.split_whitespace().next(), Some("info" | "describe")) => {
             Ok(render_mcp_unsupported_action_text(
                 args,
-                "use `claw mcp show <server>` to inspect a server",
+                "use `disco mcp show <server>` to inspect a server",
             ))
         }
         Some(args) => Ok(render_mcp_usage(Some(args))),
@@ -3241,7 +3241,7 @@ fn render_mcp_unsupported_action_json(action: &str, hint: &str) -> Value {
         "hint": hint,
         "usage": {
             "slash_command": "/mcp [list|show <server>|help]",
-            "direct_cli": "claw mcp [list|show <server>|help]",
+            "direct_cli": "disco mcp [list|show <server>|help]",
         },
     })
 }
@@ -3342,13 +3342,13 @@ fn render_mcp_report_json_for(
         Some(args) if args.split_whitespace().next() == Some("list") && args.contains(' ') => {
             Ok(render_mcp_unsupported_action_json(
                 args,
-                "list accepts no filter argument; use `claw mcp list`",
+                "list accepts no filter argument; use `disco mcp list`",
             ))
         }
         Some(args) if matches!(args.split_whitespace().next(), Some("info" | "describe")) => {
             Ok(render_mcp_unsupported_action_json(
                 args,
-                "use `claw mcp show <server>` to inspect a server",
+                "use `disco mcp show <server>` to inspect a server",
             ))
         }
         Some(args) => {
@@ -4417,7 +4417,7 @@ fn render_agents_missing_argument_json(action: &str, argument: &str) -> Value {
         "status": "error",
         "error_kind": "missing_argument",
         "argument": argument,
-        "hint": "Usage: claw agents create <name>",
+        "hint": "Usage: disco agents create <name>",
     })
 }
 
@@ -4459,7 +4459,7 @@ fn render_agent_create_error_json(name: &str, error: &std::io::Error) -> Value {
         "error_kind": error_kind,
         "name": name,
         "message": message,
-        "hint": "Use `claw agents create <name>` with a simple alphanumeric, dash, underscore, or dot name.",
+        "hint": "Use `disco agents create <name>` with a simple alphanumeric, dash, underscore, or dot name.",
     })
 }
 
@@ -4660,7 +4660,7 @@ fn render_skill_uninstall_missing_json(
         "skills_dir": registry_root.display().to_string(),
         "available_names": available_names,
         "message": format!("skill '{requested}' not found"),
-        "hint": "Run `claw skills list` to see available skills.",
+        "hint": "Run `disco skills list` to see available skills.",
     })
 }
 
@@ -4866,7 +4866,7 @@ fn render_mcp_server_report_json(
             "server_name": server_name,
             "message": format!("server `{server_name}` is not configured"),
             // #761: hint so callers know how to enumerate configured MCP servers
-            "hint": "Run `claw mcp list` to see configured servers.",
+            "hint": "Run `disco mcp list` to see configured servers.",
             "total_configured": mcp.total_configured(),
             "valid_count": mcp.valid_count(),
             "invalid_count": mcp.invalid_count(),
@@ -4893,7 +4893,7 @@ fn render_agents_usage(unexpected: Option<&str>) -> String {
     let mut lines = vec![
         "Agents".to_string(),
         "  Usage            /agents [list|show <name>|create <name>|help]".to_string(),
-        "  Direct CLI       claw agents [list|show <name>|create <name>|help]".to_string(),
+        "  Direct CLI       disco agents [list|show <name>|create <name>|help]".to_string(),
         "  Format           TOML files (.toml); create scaffolds .claw/agents/<name>.toml"
             .to_string(),
         "  Sources          .claw/agents, ~/.claw/agents, $CLAW_CONFIG_HOME/agents".to_string(),
@@ -4912,9 +4912,9 @@ fn render_agents_usage_json(unexpected: Option<&str>) -> Value {
         "status": if unexpected.is_some() { "error" } else { "ok" },
         "usage": {
             "slash_command": "/agents [list|show <name>|create <name>|help]",
-            "direct_cli": "claw agents [list|show <name>|create <name>|help]",
+            "direct_cli": "disco agents [list|show <name>|create <name>|help]",
             "format": "toml",
-            "create": "claw agents create <name>",
+            "create": "disco agents create <name>",
             "sources": [".claw/agents", "~/.claw/agents", "~/.codex/agents", "$CLAW_CONFIG_HOME/agents"],
         },
         "unexpected": unexpected,
@@ -4926,7 +4926,7 @@ fn render_skills_usage(unexpected: Option<&str>) -> String {
         "Skills".to_string(),
         "  Usage            /skills [list|show <name>|install [--project] <path>|uninstall <name>|help|<skill> [args]]".to_string(),
         "  Alias            /skill".to_string(),
-        "  Direct CLI       claw skills [list|show <name>|install [--project] <path>|uninstall <name>|help|<skill> [args]]".to_string(),
+        "  Direct CLI       disco skills [list|show <name>|install [--project] <path>|uninstall <name>|help|<skill> [args]]".to_string(),
         "  Lifecycle        install <path>, uninstall <name>".to_string(),
         "  Invoke           /skills help overview -> $help overview".to_string(),
         "  Install root     $CLAW_CONFIG_HOME/skills or ~/.claw/skills (use --project for .claw/skills)".to_string(),
@@ -4947,7 +4947,7 @@ fn render_skills_usage_json(unexpected: Option<&str>) -> Value {
         "usage": {
             "slash_command": "/skills [list|show <name>|install <path>|uninstall <name>|help|<skill> [args]]",
             "aliases": ["/skill"],
-            "direct_cli": "claw skills [list|show <name>|install <path>|uninstall <name>|help|<skill> [args]]",
+            "direct_cli": "disco skills [list|show <name>|install <path>|uninstall <name>|help|<skill> [args]]",
             "lifecycle": ["install <path>", "uninstall <name>"],
             "invoke": "/skills help overview -> $help overview",
             "install_root": "$CLAW_CONFIG_HOME/skills or ~/.claw/skills",
@@ -4974,7 +4974,7 @@ fn render_mcp_usage(unexpected: Option<&str>) -> String {
     let mut lines = vec![
         "MCP".to_string(),
         "  Usage            /mcp [list|show <server>|help]".to_string(),
-        "  Direct CLI       claw mcp [list|show <server>|help]".to_string(),
+        "  Direct CLI       disco mcp [list|show <server>|help]".to_string(),
         "  Sources          .claw/settings.json, .claw/settings.local.json".to_string(),
     ];
     if let Some(args) = unexpected {
@@ -4985,7 +4985,7 @@ fn render_mcp_usage(unexpected: Option<&str>) -> String {
 
 fn render_mcp_missing_argument_text(action: &str) -> String {
     let hint = match action {
-        "show" => "use `claw mcp show <server>` to inspect a server",
+        "show" => "use `disco mcp show <server>` to inspect a server",
         _ => "provide the required argument for this MCP action",
     };
     format!(
@@ -4997,11 +4997,11 @@ fn render_mcp_missing_argument_json(action: &str) -> Value {
     let (message, hint) = match action {
         "show" => (
             "mcp show requires a server name",
-            "Usage: claw mcp show <server>",
+            "Usage: disco mcp show <server>",
         ),
         _ => (
             "mcp action requires an argument",
-            "Usage: claw mcp [list|show <server>|help]",
+            "Usage: disco mcp [list|show <server>|help]",
         ),
     };
     json!({
@@ -5014,7 +5014,7 @@ fn render_mcp_missing_argument_json(action: &str) -> Value {
         "hint": hint,
         "usage": {
             "slash_command": "/mcp [list|show <server>|help]",
-            "direct_cli": "claw mcp [list|show <server>|help]",
+            "direct_cli": "disco mcp [list|show <server>|help]",
             "sources": [".claw/settings.json", ".claw/settings.local.json"],
         },
         "unexpected": Value::Null,
@@ -5044,7 +5044,7 @@ fn render_mcp_usage_json(unexpected: Option<&str>) -> Value {
         "hint": hint,
         "usage": {
             "slash_command": "/mcp [list|show <server>|help]",
-            "direct_cli": "claw mcp [list|show <server>|help]",
+            "direct_cli": "disco mcp [list|show <server>|help]",
             "sources": [".claw.json", ".claw/settings.json", ".claw/settings.local.json"],
         },
         "unexpected": unexpected,
@@ -5858,7 +5858,7 @@ mod tests {
     #[test]
     fn skills_show_and_list_filter_do_not_invoke_model() {
         // `show`, `info`, `list <filter>` must route to Local, not Invoke.
-        // Regression for: `claw skills show plan` unexpectedly spawned a model session.
+        // Regression for: `disco skills show plan` unexpectedly spawned a model session.
         for token in &["show", "info", "describe"] {
             assert_eq!(
                 classify_skills_slash_command(Some(token)),
@@ -6432,7 +6432,7 @@ mod tests {
         assert_eq!(help["status"], "ok");
         assert_eq!(
             help["usage"]["direct_cli"],
-            "claw agents [list|show <name>|create <name>|help]"
+            "disco agents [list|show <name>|create <name>|help]"
         );
 
         // `show <name>` is now valid. Known agent returns ok with matching entry.
@@ -6596,7 +6596,7 @@ mod tests {
         assert_eq!(help["usage"]["aliases"][0], "/skill");
         assert_eq!(
             help["usage"]["direct_cli"],
-            "claw skills [list|show <name>|install <path>|uninstall <name>|help|<skill> [args]]"
+            "disco skills [list|show <name>|install <path>|uninstall <name>|help|<skill> [args]]"
         );
 
         let _ = fs::remove_dir_all(workspace);
@@ -6613,7 +6613,7 @@ mod tests {
             agents_help.contains("Usage            /agents [list|show <name>|create <name>|help]")
         );
         assert!(agents_help
-            .contains("Direct CLI       claw agents [list|show <name>|create <name>|help]"));
+            .contains("Direct CLI       disco agents [list|show <name>|create <name>|help]"));
         assert!(agents_help.contains(
             "Format           TOML files (.toml); create scaffolds .claw/agents/<name>.toml"
         ));
@@ -6761,7 +6761,7 @@ mod tests {
 
         let help = super::handle_mcp_slash_command(Some("help"), &cwd).expect("mcp help");
         assert!(help.contains("Usage            /mcp [list|show <server>|help]"));
-        assert!(help.contains("Direct CLI       claw mcp [list|show <server>|help]"));
+        assert!(help.contains("Direct CLI       disco mcp [list|show <server>|help]"));
 
         let unexpected =
             super::handle_mcp_slash_command(Some("show alpha beta"), &cwd).expect("mcp usage");

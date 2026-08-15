@@ -339,3 +339,46 @@ button:disabled {
     transform: rotate(360deg);
   }
 }
+
+/* Round icon button: a play glyph to send, a stop square to interrupt. The
+   shape stays fixed across states so the control does not move under the
+   cursor at the exact moment it changes meaning. */
+.iconbtn {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+}
+
+.iconbtn.send {
+  background: var(--accent);
+  color: var(--bg-panel);
+}
+
+.iconbtn.send:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+/* Stop is destructive, so it is not styled like the primary action. */
+.iconbtn.stop {
+  background: var(--bg-panel);
+  color: var(--error, #e5534b);
+  border-color: var(--error, #e5534b);
+}
+
+.iconbtn.stop:hover:not(:disabled) {
+  background: var(--error, #e5534b);
+  color: var(--bg-panel);
+}
+
+.iconbtn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}

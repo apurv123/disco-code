@@ -444,7 +444,7 @@ mod tests {
         assert!(root.join(".claw.json").is_file());
         assert!(root.join("CLAUDE.md").is_file());
         assert_eq!(
-            fs::read_to_string(root.join(".claw.json")).expect("read claw json"),
+            fs::read_to_string(root.join(".claw.json")).expect("read disco json"),
             concat!(
                 "{\n",
                 "  \"permissions\": {\n",

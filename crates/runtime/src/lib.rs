@@ -1,10 +1,9 @@
-//! Core runtime primitives for the `claw` CLI and supporting crates.
+//! Core runtime primitives for the `disco` CLI and supporting crates.
 //!
 //! This crate owns session persistence, permission evaluation, prompt assembly,
 //! MCP plumbing, tool-facing file operations, and the core conversation loop
 //! that drives interactive and one-shot turns.
 
-mod approval_tokens;
 mod bash;
 pub mod bash_validation;
 mod bootstrap;
@@ -35,7 +34,6 @@ mod permissions;
 pub mod plugin_lifecycle;
 mod policy_engine;
 mod prompt;
-pub mod recovery_recipes;
 mod remote;
 mod report_schema;
 pub mod sandbox;
@@ -55,10 +53,6 @@ mod trust_resolver;
 mod usage;
 pub mod worker_boot;
 
-pub use approval_tokens::{
-    ApprovalDelegationHop, ApprovalScope, ApprovalTokenAudit, ApprovalTokenError,
-    ApprovalTokenGrant, ApprovalTokenLedger, ApprovalTokenStatus,
-};
 pub use bash::{execute_bash, BashCommandInput, BashCommandOutput};
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, BranchLockIntent};
@@ -83,7 +77,7 @@ pub use config_validate::{
 };
 pub use conversation::{
     auto_compaction_threshold_from_env, ApiClient, ApiRequest, AssistantEvent, AutoCompactionEvent,
-    ConversationRuntime, PromptCacheEvent, RuntimeError, StaticToolExecutor, ToolError,
+    ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
     ToolExecutor, TurnSummary,
 };
 pub use file_ops::{
@@ -149,11 +143,6 @@ pub use prompt::{
     load_system_prompt, load_system_prompt_with_context, prepend_bullets, ContextFile,
     ModelFamilyIdentity, ProjectContext, PromptBuildError, SystemPromptBuilder,
     ASSISTANT_NAME, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
-};
-pub use recovery_recipes::{
-    attempt_recovery, recipe_for, EscalationPolicy, FailureScenario, RecoveryAttemptState,
-    RecoveryAttemptType, RecoveryCommandResult, RecoveryContext, RecoveryEvent,
-    RecoveryLedgerEntry, RecoveryRecipe, RecoveryResult, RecoveryStatusReport, RecoveryStep,
 };
 pub use remote::{
     inherited_upstream_proxy_env, no_proxy_list, read_token, upstream_proxy_ws_url,

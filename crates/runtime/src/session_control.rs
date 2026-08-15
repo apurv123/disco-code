@@ -779,7 +779,7 @@ fn format_no_managed_sessions(sessions_root: &Path) -> String {
         .and_then(|f| f.to_str())
         .unwrap_or("<unknown>");
     format!(
-        "no managed sessions found in .claw/sessions/{fingerprint_dir}/\nStart `claw` to create a session, then rerun with `--resume {LATEST_SESSION_REFERENCE}`.\nNote: /resume {LATEST_SESSION_REFERENCE} searches all workspaces."
+        "no managed sessions found in .claw/sessions/{fingerprint_dir}/\nStart `disco` to create a session, then rerun with `--resume {LATEST_SESSION_REFERENCE}`.\nNote: /resume {LATEST_SESSION_REFERENCE} searches all workspaces."
     )
 }
 
@@ -789,7 +789,7 @@ fn format_all_sessions_empty(sessions_root: &Path) -> String {
         .and_then(|f| f.to_str())
         .unwrap_or("<unknown>");
     format!(
-        "all sessions are empty (0 messages) in .claw/sessions/{fingerprint_dir}/\nThis usually means a fresh `claw` session is running but no messages have been sent yet.\nWait for a response in your other session, then try `--resume {LATEST_SESSION_REFERENCE}` again."
+        "all sessions are empty (0 messages) in .claw/sessions/{fingerprint_dir}/\nThis usually means a fresh `disco` session is running but no messages have been sent yet.\nWait for a response in your other session, then try `--resume {LATEST_SESSION_REFERENCE}` again."
     )
 }
 

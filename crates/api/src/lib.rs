@@ -2,7 +2,6 @@ mod client;
 mod error;
 mod http_client;
 mod ollama;
-mod prompt_cache;
 mod providers;
 mod sse;
 mod types;
@@ -19,10 +18,6 @@ pub use error::ApiError;
 pub use http_client::{
     build_http_client, build_http_client_or_default, build_http_client_with,
     build_http_client_with_opts, ProxyConfig, TimeoutConfig,
-};
-pub use prompt_cache::{
-    CacheBreakEvent, PromptCache, PromptCacheConfig, PromptCachePaths, PromptCacheRecord,
-    PromptCacheStats,
 };
 pub use providers::openai_compat::{
     build_chat_completion_request, check_request_body_size, estimate_request_body_size,

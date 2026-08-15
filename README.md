@@ -47,7 +47,7 @@ turn: clarify what is ambiguous, plan before editing, harden anything
 irreversible, execute, then verify the result against the criteria the plan
 stated. Which stages run is decided per request, so `fix the typo in README.md`
 stays one turn while `clean this up` earns the full pipeline. Run
-`claw enhance "<request>"` to see the decision without spending any inference,
+`disco enhance "<request>"` to see the decision without spending any inference,
 or pass `--enhance` to a normal run to use it.
 
 ## Tools and MCP
@@ -67,7 +67,7 @@ Declare servers under `mcpServers` in `.claw/settings.json` (project) or
 }
 ```
 
-Then `claw mcp` lists what is configured and `claw mcp show <server>` prints one
+Then `disco mcp` lists what is configured and `disco mcp show <server>` prints one
 server's resolved settings. Discovered tools are namespaced per server
 (`mcp__playwright__browser_navigate`), so they cannot collide with built-ins.
 
