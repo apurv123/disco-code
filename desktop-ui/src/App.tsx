@@ -59,6 +59,8 @@ export default function App() {
   const [draft, setDraft] = createSignal("")
   const [attaching, setAttaching] = createSignal(false)
   const [attachmentError, setAttachmentError] = createSignal("")
+  const [rescanning, setRescanning] = createSignal(false)
+  const [rescanMessage, setRescanMessage] = createSignal("")
 
   // Remembered between launches so the folder is chosen once, not every session.
   const FOLDER_KEY = "disco-code.project-root"
@@ -207,6 +209,24 @@ export default function App() {
       }))
     } catch (error) {
       setAttachmentError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const rescanModels = async () => {
+    if (rescanning()) return
+    setRescanning(true)
+    setRescanMessage("Scanning...")
+    try {
+      const next = await refetch()
+      setRescanMessage(
+        next?.reachable
+          ? `Found ${next.models.length} chat model${next.models.length === 1 ? "" : "s"}.`
+          : next?.detail ?? "Ollama is not reachable.",
+      )
+    } catch (error) {
+      setRescanMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      setRescanning(false)
     }
   }
 
@@ -561,10 +581,22 @@ export default function App() {
             </For>
           </select>
           <div class="status" style={{ "margin-top": "10px" }}>
-            <button class="linkbtn" onClick={() => void refetch()}>
-              Rescan models
+            <button
+              class="linkbtn"
+              disabled={rescanning()}
+              onClick={() => void rescanModels()}
+            >
+              {rescanning() ? "Rescanning..." : "Rescan models"}
             </button>
+            <Show when={rescanning()}>
+              <span class="spinner" aria-label="Scanning for Ollama models" />
+            </Show>
           </div>
+          <Show when={rescanMessage()}>
+            <div class="aside-note" aria-live="polite">
+              {rescanMessage()}
+            </div>
+          </Show>
         </div>
       </aside>
 
