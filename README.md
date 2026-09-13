@@ -74,8 +74,25 @@ server's resolved settings. Discovered tools are namespaced per server
 Discovery is best-effort by design: a server that fails to start is reported and
 the session continues with everything else, rather than failing the run.
 
+## Document attachments
+
+The desktop app can attach documents to an individual chat. Files are copied
+into app-managed storage for that chat, chunked, embedded through the local
+Ollama daemon with `nomic-embed-text`, and searched for each question. Only the
+retrieved chunks are added to the model context; no document content is sent to
+a hosted model.
+
+Text, Markdown, source-code, JSON/YAML/TOML, CSV, HTML and PDF files are
+supported. PDF extraction is local; image-only/scanned PDFs need OCR first.
+Install the embedding model before using attachments:
+
+```sh
+ollama pull nomic-embed-text
+```
+
 
 - [Ollama](https://ollama.com), running, with at least one model pulled
+- `nomic-embed-text` in Ollama to search document attachments
 - Rust 1.90 or newer (to build from source)
 - Node.js 20 or newer (to build the desktop interface)
 

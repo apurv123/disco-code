@@ -1,8 +1,10 @@
 import { createEffect, createResource, createSignal, For, Show, onMount } from "solid-js"
 import {
+  attachDocuments,
   cancelTurn,
   chooseProjectFolder,
   daemonStatus,
+  removeAttachment as removeStoredAttachment,
   sendPrompt,
   triageRequest,
   type Model,
@@ -55,6 +57,8 @@ export default function App() {
   // 1.0s with it off, and the scratchpad is never shown.
   const [reasoning, setReasoning] = createSignal(false)
   const [draft, setDraft] = createSignal("")
+  const [attaching, setAttaching] = createSignal(false)
+  const [attachmentError, setAttachmentError] = createSignal("")
 
   // Remembered between launches so the folder is chosen once, not every session.
   const FOLDER_KEY = "disco-code.project-root"
@@ -117,7 +121,10 @@ export default function App() {
   // Default to the first model that can actually drive the agent loop.
   createEffect(() => {
     const usable = status()?.models.find((m) => m.usable)
-    if (usable && !model()) setModel(usable.id)
+    const selectedStillExists = status()?.models.some(
+      (candidate) => candidate.id === model() && candidate.usable,
+    )
+    if (usable && !selectedStillExists) setModel(usable.id)
   })
 
   // Triage is deterministic and free, so the routing decision is shown while
@@ -154,6 +161,53 @@ export default function App() {
       updatedAt: Date.now(),
     }))
     if (id === activeId()) scrollDown()
+  }
+
+  const attachToActive = async () => {
+    const id = activeId()
+    if (attaching() || isRunning(id)) return
+    setAttachmentError("")
+    setAttaching(true)
+    try {
+      const added = await attachDocuments(id)
+      if (added.length > 0) {
+        patch(id, (chat) => {
+          const byStoredName = new Map(
+            chat.attachments.map((attachment) => [attachment.storedName, attachment]),
+          )
+          for (const attachment of added) {
+            byStoredName.set(attachment.storedName, attachment)
+          }
+          return {
+            ...chat,
+            attachments: [...byStoredName.values()],
+            updatedAt: Date.now(),
+          }
+        })
+      }
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setAttaching(false)
+    }
+  }
+
+  const removeAttachment = async (storedName: string) => {
+    const id = activeId()
+    if (isRunning(id)) return
+    setAttachmentError("")
+    try {
+      await removeStoredAttachment(id, storedName)
+      patch(id, (chat) => ({
+        ...chat,
+        attachments: chat.attachments.filter(
+          (attachment) => attachment.storedName !== storedName,
+        ),
+        updatedAt: Date.now(),
+      }))
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : String(error))
+    }
   }
 
   const appendToLast = (id: string, text: string, stage: string | null) => {
@@ -197,6 +251,7 @@ export default function App() {
   const submit = async () => {
     const request = draft().trim()
     const id = activeId()
+    const hasAttachments = active().attachments.length > 0
     // Only this chat has to be idle. Other chats may be mid-turn.
     if (!request || isRunning(id) || !model()) return
 
@@ -279,6 +334,7 @@ export default function App() {
         enhance(),
         reasoning(),
         projectRoot(),
+        hasAttachments,
         onEvent,
       )
     } catch (error) {
@@ -574,6 +630,29 @@ export default function App() {
         </div>
 
         <div class="composer">
+          <Show when={active().attachments.length > 0}>
+            <div class="attachments" aria-label="Attached documents">
+              <For each={active().attachments}>
+                {(attachment) => (
+                  <span class="attachment">
+                    <span title={attachment.name}>{attachment.name}</span>
+                    <button
+                      title={`Remove ${attachment.name}`}
+                      disabled={runningHere()}
+                      onClick={() => void removeAttachment(attachment.storedName)}
+                    >
+                      ×
+                    </button>
+                  </span>
+                )}
+              </For>
+            </div>
+          </Show>
+          <Show when={attachmentError()}>
+            <div class="composer-error" aria-live="polite">
+              {attachmentError()}
+            </div>
+          </Show>
           <textarea
             placeholder={
               status()?.reachable
@@ -585,6 +664,15 @@ export default function App() {
             onInput={(event) => setDraft(event.currentTarget.value)}
             onKeyDown={onKeyDown}
           />
+          <button
+            class="iconbtn attach"
+            title="Attach documents for local RAG"
+            aria-label="Attach documents for local RAG"
+            disabled={attaching() || runningHere()}
+            onClick={() => void attachToActive()}
+          >
+            {attaching() ? <span class="spinner" /> : "＋"}
+          </button>
           <button
             class={runningHere() ? "iconbtn stop" : "iconbtn send"}
             title={runningHere() ? "Stop generating" : "Send"}

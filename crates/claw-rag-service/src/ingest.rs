@@ -23,8 +23,9 @@ const EMBED_BATCH: usize = 16;
 static SKIP_DIR_NAMES: &[&str] = &[".git", "target", "node_modules", "__pycache__", ".claw-rag"];
 
 static TEXT_EXTENSIONS: &[&str] = &[
-    "rs", "md", "toml", "txt", "json", "yaml", "yml", "js", "ts", "tsx", "jsx", "py", "go", "c",
-    "h", "cpp", "hpp", "cs", "java", "kt", "swift", "rb", "php", "sh", "ps1", "html", "css", "sql",
+    "rs", "md", "rst", "toml", "txt", "csv", "json", "yaml", "yml", "js", "ts", "tsx", "jsx", "py",
+    "go", "c", "h", "cpp", "hpp", "cs", "java", "kt", "swift", "rb", "php", "sh", "ps1", "html",
+    "css", "sql",
 ];
 
 #[derive(Debug, Default)]

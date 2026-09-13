@@ -54,6 +54,11 @@ export type TurnEvent =
   | { kind: "tool_start"; name: string; summary: string }
   | { kind: "tool_end"; name: string; ok: boolean; detail: string }
 
+export type Attachment = {
+  name: string
+  storedName: string
+}
+
 export function daemonStatus(): Promise<DaemonStatus> {
   return invoke<DaemonStatus>("daemon_status")
 }
@@ -77,6 +82,17 @@ export function chooseProjectFolder(): Promise<string | null> {
   return invoke<string | null>("choose_project_folder")
 }
 
+export function attachDocuments(chatId: string): Promise<Attachment[]> {
+  return invoke<Attachment[]>("attach_documents", { chatId })
+}
+
+export function removeAttachment(
+  chatId: string,
+  storedName: string,
+): Promise<void> {
+  return invoke<void>("remove_attachment", { chatId, storedName })
+}
+
 export function sendPrompt(
   turnId: string,
   request: string,
@@ -84,6 +100,7 @@ export function sendPrompt(
   enhance: boolean,
   reasoning: boolean,
   projectRoot: string | null,
+  hasAttachments: boolean,
   onEvent: (event: TurnEvent) => void,
 ): Promise<void> {
   const channel = new Channel<TurnEvent>()
@@ -96,5 +113,6 @@ export function sendPrompt(
     enhance,
     reasoning,
     projectRoot,
+    hasAttachments,
   })
 }

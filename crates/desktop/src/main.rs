@@ -21,6 +21,8 @@ fn main() {
             commands::send_prompt,
             commands::cancel_turn,
             commands::choose_project_folder,
+            commands::attach_documents,
+            commands::remove_attachment,
         ])
         .run(tauri::generate_context!())
         .expect("the desktop shell failed to start");

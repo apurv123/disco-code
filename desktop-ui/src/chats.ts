@@ -21,10 +21,18 @@ export type Entry = {
   ok?: boolean
 }
 
+export type Attachment = {
+  /** Original file name shown in the chat. */
+  name: string
+  /** Safe name of the app-managed local copy. */
+  storedName: string
+}
+
 export type Chat = {
   id: string
   title: string
   entries: Entry[]
+  attachments: Attachment[]
   updatedAt: number
 }
 
@@ -40,7 +48,13 @@ export function newId(): string {
 }
 
 export function emptyChat(): Chat {
-  return { id: newId(), title: "New chat", entries: [], updatedAt: Date.now() }
+  return {
+    id: newId(),
+    title: "New chat",
+    entries: [],
+    attachments: [],
+    updatedAt: Date.now(),
+  }
 }
 
 /**
@@ -70,7 +84,11 @@ export function load(): Chat[] {
   try {
     const parsed: unknown = JSON.parse(raw)
     if (!Array.isArray(parsed)) return []
-    return parsed.filter(isChat)
+    return parsed.filter(isChat).map((chat) => ({
+      ...chat,
+      // Chats saved before attachment support remain valid.
+      attachments: Array.isArray(chat.attachments) ? chat.attachments : [],
+    }))
   } catch {
     return []
   }
