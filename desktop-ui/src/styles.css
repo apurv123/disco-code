@@ -56,7 +56,7 @@ body {
   padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
   overflow: hidden;
   min-height: 0;
 }
@@ -66,45 +66,19 @@ body {
   flex: 1 1 auto;
   min-height: 0;
   flex-direction: column;
-  gap: 18px;
-  overflow-y: auto;
-  /* Keep the content edge clean until there is actually something to scroll.
-     Firefox and Chromium/WebView2 use different scrollbar APIs, so both are
-     supplied. */
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
-}
-
-.sidebar-content:hover {
-  scrollbar-color: color-mix(in srgb, var(--primary) 55%, transparent) transparent;
+  gap: 14px;
+  overflow: hidden;
+  scrollbar-width: none;
 }
 
 .sidebar-content::-webkit-scrollbar {
-  width: 6px;
-}
-
-.sidebar-content::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.sidebar-content::-webkit-scrollbar-thumb {
-  min-height: 36px;
-  border-radius: 999px;
-  background: transparent;
-}
-
-.sidebar-content:hover::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--primary) 55%, transparent);
-}
-
-.sidebar-content::-webkit-scrollbar-thumb:hover {
-  background: var(--primary);
+  display: none;
 }
 
 .settings-pane {
   display: flex;
   flex-direction: column;
-  gap: 22px;
+  gap: 18px;
 }
 
 .settings-head {
@@ -139,8 +113,8 @@ body {
   height: 36px;
   border: 1px solid var(--primary);
   border-radius: 7px;
-  background: var(--primary);
-  color: var(--bg);
+  background: var(--bg-panel);
+  color: var(--primary);
   padding: 0 10px;
 }
 
@@ -168,8 +142,10 @@ body {
 .rescan-btn:hover:not(:disabled),
 .settings-btn:hover:not(:disabled),
 .settings-btn.active {
-  color: var(--bg);
-  filter: brightness(1.12);
+  color: var(--primary);
+  background: var(--bg-panel);
+  border-color: color-mix(in srgb, var(--primary) 72%, var(--border));
+  filter: brightness(1.15);
 }
 
 .brand {
@@ -265,74 +241,6 @@ textarea:focus {
   padding: 9px 11px;
 }
 
-/* ---- triage preview --------------------------------------------------- */
-
-.triage {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px 11px;
-  background: var(--bg-raised);
-}
-
-.triage-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.badge {
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 2px 7px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  color: var(--text-weak);
-}
-
-.badge.trivial {
-  color: var(--success);
-  border-color: color-mix(in srgb, var(--success) 45%, transparent);
-}
-
-.badge.standard {
-  color: var(--info);
-  border-color: color-mix(in srgb, var(--info) 45%, transparent);
-}
-
-.badge.complex {
-  color: var(--warning);
-  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
-}
-
-.stage-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-
-.chip {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  color: var(--text-weak);
-}
-
-.chip.active {
-  color: var(--bg);
-  background: var(--primary);
-  border-color: var(--primary);
-}
-
-.chip.done {
-  color: var(--success);
-  border-color: color-mix(in srgb, var(--success) 45%, transparent);
-}
-
 /* ---- main ------------------------------------------------------------- */
 
 .main {
@@ -402,14 +310,6 @@ textarea:focus {
 .msg.error .msg-body {
   border-color: color-mix(in srgb, var(--error) 55%, transparent);
   color: var(--error);
-}
-
-.stage-marker {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--primary);
-  margin: 6px 0 4px;
 }
 
 .composer {
@@ -624,8 +524,10 @@ button:disabled {
    Everything below it stays visible at any history length. */
 .chats {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
   gap: 6px;
 }
 
@@ -638,6 +540,7 @@ button:disabled {
 
 .chats-list {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 2px;
   overflow-y: auto;
@@ -645,6 +548,11 @@ button:disabled {
   max-height: 190px;
   margin: 0 -6px;
   padding: 0 6px;
+  scrollbar-width: none;
+}
+
+.chats-list::-webkit-scrollbar {
+  display: none;
 }
 
 .chat-row {
