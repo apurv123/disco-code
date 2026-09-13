@@ -101,6 +101,7 @@ export function sendPrompt(
   reasoning: boolean,
   projectRoot: string | null,
   hasAttachments: boolean,
+  embeddingModel: string | null,
   onEvent: (event: TurnEvent) => void,
 ): Promise<void> {
   const channel = new Channel<TurnEvent>()
@@ -114,5 +115,6 @@ export function sendPrompt(
     reasoning,
     projectRoot,
     hasAttachments,
+    embeddingModel,
   })
 }

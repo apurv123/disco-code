@@ -7,6 +7,7 @@
 //! repeats until it stops asking.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ use api::{
     ToolChoice, ToolDefinition,
 };
 use serde_json::Value;
+use tokio::sync::Notify;
 
 use crate::workspace::Workspace;
 
@@ -53,6 +55,47 @@ const WRITE_TOOLS: &[&str] = &["write_file", "edit_file"];
 /// call forever. The cap turns that into a bounded, explainable stop instead of
 /// a session that runs until the user kills it.
 const MAX_STEPS: usize = 8;
+
+/// Cooperative cancellation that can wake a task blocked waiting for the next
+/// model-stream event.
+///
+/// An atomic flag alone is insufficient: if Ollama spends a minute before
+/// yielding another chunk, no code runs to observe the flag. `Notify` provides
+/// the missing wake-up edge while the atomic preserves race-free state checks.
+pub struct CancelToken {
+    cancelled: AtomicBool,
+    notify: Notify,
+}
+
+impl CancelToken {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub async fn cancelled(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
 
 /// What the loop produced, and why it ended.
 pub struct Outcome {
@@ -134,6 +177,8 @@ pub fn system_prompt(today: &str, workspace: Option<&Workspace>) -> String {
          - To read a file, call read_file. To find files, call glob_search. To search contents, \
          call grep_search. Do not guess what a file contains.\n\
          - Use WebFetch to read a specific page you already have a URL for.\n\
+         - WebFetch returns page content directly. It does not create data/*.html files; never \
+         call read_file or grep_search on an imagined WebFetch output path.\n\
          - When you have used web results, end with a Sources section listing the URLs.\n\
          {files}\
          - You cannot run shell commands. If a request needs one, say so plainly and give the \
@@ -151,15 +196,16 @@ pub async fn run(
     first: String,
     reasoning: bool,
     workspace: Option<&Workspace>,
-    cancel: &Arc<AtomicBool>,
+    cancel: &Arc<CancelToken>,
     sink: &dyn Sink,
 ) -> Result<Outcome, String> {
     let tool_defs = definitions(workspace);
     let mut messages = vec![InputMessage::user_text(first)];
     let mut transcript = String::new();
+    let mut last_web_url: Option<String> = None;
 
     for step in 0..MAX_STEPS {
-        if cancel.load(Ordering::SeqCst) {
+        if cancel.is_cancelled() {
             return Ok(Outcome {
                 text: transcript,
                 cancelled: true,
@@ -200,7 +246,14 @@ pub async fn run(
         // the page, and passing the URL to grep_search only produces
         // "filename or volume label syntax is incorrect".
         for call in &mut step_result.calls {
-            normalize_tool_call(call);
+            normalize_tool_call(call, last_web_url.as_deref(), workspace);
+            if call.name == "WebFetch" {
+                last_web_url = call
+                    .input
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
         }
 
         transcript.push_str(&step_result.text);
@@ -234,7 +287,7 @@ pub async fn run(
 
         let last_step = step + 1 == MAX_STEPS;
         for call in step_result.calls {
-            if cancel.load(Ordering::SeqCst) {
+            if cancel.is_cancelled() {
                 return Ok(Outcome {
                     text: transcript,
                     cancelled: true,
@@ -242,7 +295,15 @@ pub async fn run(
             }
 
             sink.tool_start(&call.name, &summarize(&call.name, &call.input));
-            let (output, is_error) = execute(&call, workspace).await;
+            let (output, is_error) = tokio::select! {
+                () = cancel.cancelled() => {
+                    return Ok(Outcome {
+                        text: transcript,
+                        cancelled: true,
+                    });
+                }
+                result = execute(&call, workspace) => result,
+            };
             sink.tool_end(&call.name, !is_error, &first_line(&output));
 
             messages.push(InputMessage::user_tool_result(
@@ -294,7 +355,11 @@ struct StepResult {
 /// This intentionally does not guess broadly. Only an absolute HTTP(S) URL
 /// sent to a file reader is converted to WebFetch, and a WebFetch call missing
 /// its required prompt receives a neutral extraction instruction.
-fn normalize_tool_call(call: &mut ToolCall) {
+fn normalize_tool_call(
+    call: &mut ToolCall,
+    last_web_url: Option<&str>,
+    workspace: Option<&Workspace>,
+) {
     let path = call
         .input
         .get("path")
@@ -316,6 +381,26 @@ fn normalize_tool_call(call: &mut ToolCall) {
         }
     }
 
+    // Granite sometimes treats the already-returned WebFetch body as though it
+    // had been saved to `data/1.html`, then tries to grep that invented file.
+    // Re-fetching the last page with the requested pattern is deterministic and
+    // avoids turning a model convention into a Windows path error.
+    if call.name == "grep_search" {
+        if let (Some(path), Some(url)) = (path, last_web_url) {
+            if looks_like_webfetch_staging_path(path) && !local_path_exists(path, workspace) {
+                let prompt = call
+                    .input
+                    .get("pattern")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("Extract the page content relevant to the user's request.");
+                call.name = "WebFetch".to_string();
+                call.input = serde_json::json!({ "url": url, "prompt": prompt });
+                return;
+            }
+        }
+    }
+
     if call.name == "WebFetch"
         && call.input.get("url").and_then(Value::as_str).is_some()
         && call.input.get("prompt").and_then(Value::as_str).is_none()
@@ -327,6 +412,24 @@ fn normalize_tool_call(call: &mut ToolCall) {
 
 fn is_http_url(candidate: &str) -> bool {
     reqwest::Url::parse(candidate).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+fn looks_like_webfetch_staging_path(candidate: &str) -> bool {
+    let normalized = candidate.replace('\\', "/");
+    normalized.starts_with("data/")
+        && Path::new(&normalized)
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "htm" | "html"))
+}
+
+fn local_path_exists(candidate: &str, workspace: Option<&Workspace>) -> bool {
+    if let Some(workspace) = workspace {
+        return workspace
+            .confine(candidate)
+            .is_ok_and(|path| path.exists());
+    }
+    Path::new(candidate).exists()
 }
 
 /// Recovers a tool call that the model wrote as text instead of calling.
@@ -402,20 +505,28 @@ fn looks_like_tool_json(text: &str) -> bool {
 async fn stream_step(
     client: &api::ProviderClient,
     request: &api::MessageRequest,
-    cancel: &Arc<AtomicBool>,
+    cancel: &Arc<CancelToken>,
     sink: &dyn Sink,
 ) -> Result<StepResult, String> {
-    let mut stream = client
-        .stream_message(request)
-        .await
-        .map_err(|error| error.to_string())?;
+    let stream = tokio::select! {
+        biased;
+        () = cancel.cancelled() => {
+            return Ok(StepResult {
+                text: String::new(),
+                calls: Vec::new(),
+                cancelled: true,
+            });
+        }
+        result = client.stream_message(request) => result,
+    };
+    let mut stream = stream.map_err(|error| error.to_string())?;
 
     let mut text = String::new();
     let mut emitted = 0usize;
     let mut pending: Vec<(u32, String, String, String)> = Vec::new();
 
     loop {
-        if cancel.load(Ordering::SeqCst) {
+        if cancel.is_cancelled() {
             return Ok(StepResult {
                 text,
                 calls: Vec::new(),
@@ -423,7 +534,19 @@ async fn stream_step(
             });
         }
 
-        match stream.next_event().await {
+        let event = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                return Ok(StepResult {
+                    text,
+                    calls: Vec::new(),
+                    cancelled: true,
+                });
+            }
+            event = stream.next_event() => event,
+        };
+
+        match event {
             Ok(Some(StreamEvent::ContentBlockStart(start))) => {
                 if let OutputContentBlock::ToolUse { id, name, .. } = start.content_block {
                     pending.push((start.index, id, name, String::new()));
@@ -751,7 +874,7 @@ mod tests {
             }),
         };
 
-        normalize_tool_call(&mut call);
+        normalize_tool_call(&mut call, None, None);
 
         assert_eq!(call.name, "WebFetch");
         assert_eq!(call.input["url"], "https://example.com/news/today");
@@ -768,7 +891,7 @@ mod tests {
         };
         let original = call.clone();
 
-        normalize_tool_call(&mut call);
+        normalize_tool_call(&mut call, None, None);
 
         assert_eq!(call.name, original.name);
         assert_eq!(call.input, original.input);
@@ -782,7 +905,7 @@ mod tests {
             input: serde_json::json!({ "url": "https://example.com" }),
         };
 
-        normalize_tool_call(&mut call);
+        normalize_tool_call(&mut call, None, None);
 
         assert!(call.input["prompt"]
             .as_str()
@@ -797,9 +920,69 @@ mod tests {
             input: serde_json::json!({ "path": "file:///C:/secret.txt" }),
         };
 
-        normalize_tool_call(&mut call);
+        normalize_tool_call(&mut call, None, None);
 
         assert_eq!(call.name, "read_file");
+    }
+
+    #[test]
+    fn an_invented_webfetch_staging_file_reuses_the_last_url() {
+        let mut call = ToolCall {
+            id: "call-5".to_string(),
+            name: "grep_search".to_string(),
+            input: serde_json::json!({
+                "path": "data/1.html",
+                "pattern": "headline"
+            }),
+        };
+
+        normalize_tool_call(
+            &mut call,
+            Some("https://news.example.com/today"),
+            None,
+        );
+
+        assert_eq!(call.name, "WebFetch");
+        assert_eq!(call.input["url"], "https://news.example.com/today");
+        assert_eq!(call.input["prompt"], "headline");
+    }
+
+    #[test]
+    fn a_real_staging_file_is_not_rewritten() {
+        let root = std::env::temp_dir().join("disco-real-webfetch-staging");
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("1.html"), "real local file").unwrap();
+        let workspace = Workspace::open(root.to_str().unwrap()).unwrap();
+        let mut call = ToolCall {
+            id: "call-6".to_string(),
+            name: "grep_search".to_string(),
+            input: serde_json::json!({ "path": "data/1.html", "pattern": "local" }),
+        };
+
+        normalize_tool_call(
+            &mut call,
+            Some("https://news.example.com/today"),
+            Some(&workspace),
+        );
+
+        assert_eq!(call.name, "grep_search");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn cancellation_wakes_a_task_that_is_waiting() {
+        let token = Arc::new(CancelToken::new());
+        let cancelling = Arc::clone(&token);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            cancelling.cancel();
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), token.cancelled())
+            .await
+            .expect("cancellation must wake without waiting for a model event");
+        assert!(token.is_cancelled());
     }
 
     /// Collects what the loop did, so a live run can be asserted on.
@@ -839,7 +1022,7 @@ mod tests {
         let model = std::env::var("DISCO_TEST_MODEL")
             .unwrap_or_else(|_| "qwen2.5-coder:7b".to_string());
         let client = api::ProviderClient::from_model(&model).expect("client");
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(CancelToken::new());
         let recorder = Recorder::default();
 
         let outcome = run(
@@ -876,6 +1059,44 @@ mod tests {
         );
     }
 
+    /// A local model may spend a long time before its next visible token. Stop
+    /// must interrupt that wait rather than merely set a flag to be noticed
+    /// after generation has already finished.
+    #[tokio::test]
+    #[ignore = "requires a running Ollama daemon"]
+    async fn a_live_generation_can_be_cancelled_without_waiting_for_a_token() {
+        let model = std::env::var("DISCO_TEST_MODEL")
+            .unwrap_or_else(|_| "granite4.1:8b".to_string());
+        let client = api::ProviderClient::from_model(&model).expect("client");
+        let cancel = Arc::new(CancelToken::new());
+        let cancelling = Arc::clone(&cancel);
+        let recorder = Recorder::default();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            cancelling.cancel();
+        });
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(
+                &client,
+                &model,
+                system_prompt("2026-09-13", None),
+                "Write a detailed analysis of five approaches to designing a compiler."
+                    .to_string(),
+                true,
+                None,
+                &cancel,
+                &recorder,
+            ),
+        )
+        .await
+        .expect("stop should not wait for another model token")
+        .expect("the cancelled run should end normally");
+
+        assert!(outcome.cancelled);
+    }
+
     /// The user's screenshot showed the model claiming it had created
     /// `hello_world.py` when no file existed. This asserts the file is really
     /// on disk afterwards, which narration cannot fake.
@@ -890,7 +1111,7 @@ mod tests {
         let workspace = Workspace::open(dir.to_str().unwrap()).unwrap();
 
         let client = api::ProviderClient::from_model(&model).expect("client");
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = Arc::new(CancelToken::new());
         let recorder = Recorder::default();
 
         let outcome = run(

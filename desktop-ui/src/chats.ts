@@ -33,6 +33,9 @@ export type Chat = {
   title: string
   entries: Entry[]
   attachments: Attachment[]
+  model: string
+  enhance: boolean
+  reasoning: boolean
   updatedAt: number
 }
 
@@ -53,6 +56,9 @@ export function emptyChat(): Chat {
     title: "New chat",
     entries: [],
     attachments: [],
+    model: "",
+    enhance: true,
+    reasoning: false,
     updatedAt: Date.now(),
   }
 }
@@ -88,6 +94,11 @@ export function load(): Chat[] {
       ...chat,
       // Chats saved before attachment support remain valid.
       attachments: Array.isArray(chat.attachments) ? chat.attachments : [],
+      // Model and agent behaviour belong to the conversation. Supply the
+      // original defaults when loading chats saved before these fields existed.
+      model: typeof chat.model === "string" ? chat.model : "",
+      enhance: typeof chat.enhance === "boolean" ? chat.enhance : true,
+      reasoning: typeof chat.reasoning === "boolean" ? chat.reasoning : false,
     }))
   } catch {
     return []

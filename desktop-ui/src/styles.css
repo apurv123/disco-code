@@ -57,8 +57,88 @@ body {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  overflow-y: auto;
+  overflow: hidden;
   min-height: 0;
+}
+
+.sidebar-content {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 18px;
+  overflow-y: auto;
+}
+
+.settings-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text-weak);
+  font-size: 12px;
+}
+
+.settings-copy {
+  margin: 0 0 9px;
+  color: var(--text-weak);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.sidebar-footer {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  height: 36px;
+}
+
+.rescan-btn,
+.settings-btn {
+  height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-weak);
+  padding: 0 10px;
+}
+
+.rescan-btn {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.rescan-btn > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-btn {
+  width: 36px;
+  padding: 0;
+  font-size: 16px;
+}
+
+.rescan-btn:hover:not(:disabled),
+.settings-btn:hover:not(:disabled),
+.settings-btn.active {
+  color: var(--text);
+  border-color: var(--primary);
 }
 
 .brand {
@@ -307,7 +387,7 @@ textarea:focus {
   padding: 13px 16px;
   display: flex;
   gap: 10px;
-  align-items: flex-end;
+  align-items: stretch;
   flex-wrap: wrap;
   /* Anchored: the composer must never be moved by the transcript growing. */
   flex: none;
@@ -359,10 +439,62 @@ textarea:focus {
 }
 
 textarea {
+  flex: 1 0 100%;
   resize: none;
   min-height: 46px;
   max-height: 190px;
   font-size: 13.5px;
+}
+
+.composer-toolbar {
+  display: flex;
+  flex: 1 0 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.composer-options,
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.composer-options {
+  min-width: 0;
+}
+
+.composer-actions {
+  margin-left: auto;
+}
+
+.chat-model {
+  width: auto;
+  max-width: 220px;
+  height: 34px;
+  padding: 4px 28px 4px 8px;
+}
+
+.compact-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-weak);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.compact-toggle input {
+  margin: 0;
+}
+
+.compact-toggle:has(input:disabled) {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 button {
@@ -406,8 +538,8 @@ button:disabled {
    cursor at the exact moment it changes meaning. */
 .iconbtn {
   flex: 0 0 auto;
-  width: 46px;
-  height: 46px;
+  width: 36px;
+  height: 36px;
   padding: 0;
   border-radius: 50%;
   display: inline-flex;

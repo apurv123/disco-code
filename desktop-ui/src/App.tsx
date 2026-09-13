@@ -28,6 +28,7 @@ type Run = {
   thinkingChars: number
   elapsed: number
   tool: string | null
+  stopping: boolean
 }
 
 const IDLE: Run = {
@@ -36,6 +37,7 @@ const IDLE: Run = {
   thinkingChars: 0,
   elapsed: 0,
   tool: null,
+  stopping: false,
 }
 
 /** Debounce so triage runs on a settled request, not on every keystroke. */
@@ -51,16 +53,16 @@ function useDebounced<T>(source: () => T, delay: number): () => T {
 
 export default function App() {
   const [status, { refetch }] = createResource(daemonStatus)
-  const [model, setModel] = createSignal("")
-  const [enhance, setEnhance] = createSignal(true)
-  // Off by default: a measured one-word answer cost 40.5s with reasoning on and
-  // 1.0s with it off, and the scratchpad is never shown.
-  const [reasoning, setReasoning] = createSignal(false)
   const [draft, setDraft] = createSignal("")
   const [attaching, setAttaching] = createSignal(false)
   const [attachmentError, setAttachmentError] = createSignal("")
   const [rescanning, setRescanning] = createSignal(false)
   const [rescanMessage, setRescanMessage] = createSignal("")
+  const [settingsOpen, setSettingsOpen] = createSignal(false)
+  const EMBEDDING_KEY = "disco-code.embedding-model"
+  const [embeddingModel, setEmbeddingModel] = createSignal(
+    localStorage.getItem(EMBEDDING_KEY) ?? "",
+  )
 
   // Remembered between launches so the folder is chosen once, not every session.
   const FOLDER_KEY = "disco-code.project-root"
@@ -97,7 +99,10 @@ export default function App() {
   // must not block or cancel a turn in another.
   const [runs, setRuns] = createSignal<Record<string, Run>>({})
 
-  const [themeId, setThemeId] = createSignal(DEFAULT_THEME_ID)
+  const THEME_KEY = "disco-code.theme"
+  const [themeId, setThemeId] = createSignal(
+    localStorage.getItem(THEME_KEY) ?? DEFAULT_THEME_ID,
+  )
   const [triage, setTriage] = createSignal<Triage | null>(null)
 
   let transcriptRef: HTMLDivElement | undefined
@@ -109,24 +114,60 @@ export default function App() {
   const run = (): Run => runs()[activeId()] ?? IDLE
 
   onMount(() => {
-    const theme = THEMES.find((t) => t.id === DEFAULT_THEME_ID)
+    const theme =
+      THEMES.find((candidate) => candidate.id === themeId()) ??
+      THEMES.find((candidate) => candidate.id === DEFAULT_THEME_ID)
     if (theme) applyTheme(theme, true)
   })
 
   createEffect(() => {
     const theme = THEMES.find((t) => t.id === themeId())
-    if (theme) applyTheme(theme, true)
+    if (theme) {
+      applyTheme(theme, true)
+      localStorage.setItem(THEME_KEY, theme.id)
+    }
   })
 
   createEffect(() => saveChats(chats()))
 
-  // Default to the first model that can actually drive the agent loop.
   createEffect(() => {
-    const usable = status()?.models.find((m) => m.usable)
-    const selectedStillExists = status()?.models.some(
-      (candidate) => candidate.id === model() && candidate.usable,
+    const selected = embeddingModel()
+    if (selected) localStorage.setItem(EMBEDDING_KEY, selected)
+    else localStorage.removeItem(EMBEDDING_KEY)
+  })
+
+  // Repair only chats whose saved model cannot drive the agent loop. Each
+  // valid per-chat selection remains untouched when status is refreshed.
+  createEffect(() => {
+    const models = status()?.models
+    if (!models) return
+    const fallback = models.find((candidate) => candidate.usable)?.id ?? ""
+    setChats((previous) => {
+      let changed = false
+      const next = previous.map((chat) => {
+        const valid = models.some(
+          (candidate) => candidate.id === chat.model && candidate.usable,
+        )
+        if (chat.model && valid) return chat
+        if (chat.model === fallback) return chat
+        changed = true
+        return { ...chat, model: fallback }
+      })
+      return changed ? next : previous
+    })
+  })
+
+  createEffect(() => {
+    const models = status()?.embedding_models
+    if (!models) return
+    const current = embeddingModel()
+    if (models.includes(current)) return
+    const preferred = models.find(
+      (candidate) =>
+        candidate === "nomic-embed-text" ||
+        candidate.startsWith("nomic-embed-text:"),
     )
-    if (usable && !selectedStillExists) setModel(usable.id)
+    setEmbeddingModel(preferred ?? models[0] ?? "")
   })
 
   // Triage is deterministic and free, so the routing decision is shown while
@@ -134,7 +175,7 @@ export default function App() {
   const settled = useDebounced(draft, 220)
   createEffect(() => {
     const request = settled().trim()
-    if (!request || !enhance()) {
+    if (!request || !active().enhance) {
       setTriage(null)
       return
     }
@@ -167,7 +208,7 @@ export default function App() {
 
   const attachToActive = async () => {
     const id = activeId()
-    if (attaching() || isRunning(id)) return
+    if (attaching() || isRunning(id) || !embeddingModel()) return
     setAttachmentError("")
     setAttaching(true)
     try {
@@ -215,7 +256,7 @@ export default function App() {
   const rescanModels = async () => {
     if (rescanning()) return
     setRescanning(true)
-    setRescanMessage("Scanning...")
+    setRescanMessage("")
     try {
       const next = await refetch()
       setRescanMessage(
@@ -227,7 +268,21 @@ export default function App() {
       setRescanMessage(error instanceof Error ? error.message : String(error))
     } finally {
       setRescanning(false)
+      setTimeout(() => setRescanMessage(""), 3500)
     }
+  }
+
+  const stopActive = () => {
+    const id = activeId()
+    const current = runs()[id]
+    if (!current || current.stopping) return
+    patchRun(id, (running) => ({ ...running, stopping: true }))
+    void cancelTurn(id).catch((error) => {
+      push(id, {
+        role: "error",
+        text: error instanceof Error ? error.message : String(error),
+      })
+    })
   }
 
   const appendToLast = (id: string, text: string, stage: string | null) => {
@@ -271,9 +326,10 @@ export default function App() {
   const submit = async () => {
     const request = draft().trim()
     const id = activeId()
-    const hasAttachments = active().attachments.length > 0
+    const chat = active()
+    const hasAttachments = chat.attachments.length > 0
     // Only this chat has to be idle. Other chats may be mid-turn.
-    if (!request || isRunning(id) || !model()) return
+    if (!request || isRunning(id) || !chat.model) return
 
     patch(id, (chat) => ({
       ...chat,
@@ -350,11 +406,12 @@ export default function App() {
       await sendPrompt(
         id,
         request,
-        model(),
-        enhance(),
-        reasoning(),
+        chat.model,
+        chat.enhance,
+        chat.reasoning,
         projectRoot(),
         hasAttachments,
+        embeddingModel() || null,
         onEvent,
       )
     } catch (error) {
@@ -386,217 +443,204 @@ export default function App() {
           <span>Disco Code</span>
         </div>
 
-        <div class="chats">
-          <div class="chats-head">
-            <div class="section-label" style={{ margin: 0 }}>
-              Chats
-            </div>
-            <button class="linkbtn" onClick={startChat}>
-              New
-            </button>
-          </div>
-          <div class="chats-list">
-            <For each={chats()}>
-              {(chat) => (
-                <div
-                  class={`chat-row ${chat.id === activeId() ? "active" : ""}`}
-                  onClick={() => openChat(chat.id)}
-                  title={chat.title}
-                >
-                  <Show when={isRunning(chat.id)}>
-                    <span class="spinner" style={{ margin: 0 }} />
-                  </Show>
-                  <span class="chat-title">{chat.title}</span>
-                  <button
-                    class="chat-del"
-                    title="Delete chat"
-                    aria-label={`Delete ${chat.title}`}
-                    disabled={isRunning(chat.id)}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      removeChat(chat.id)
-                    }}
-                  >
-                    &times;
-                  </button>
-                </div>
-              )}
-            </For>
-          </div>
-        </div>
-
-        <div>
-          <div class="section-label">Daemon</div>
-          <div class="status">
-            <span
-              class={`status-dot ${status()?.reachable ? "up" : "down"}`}
-              aria-hidden="true"
-            />
-            <span>{status()?.host ?? "checking..."}</span>
-          </div>
-          <Show when={status() && !status()!.reachable}>
-            <div class="hint" style={{ "margin-top": "9px" }}>
-              {status()!.detail}
-            </div>
-          </Show>
-        </div>
-
-        <div>
-          <div class="section-label">Model</div>
-          <select
-            value={model()}
-            onChange={(event) => setModel(event.currentTarget.value)}
-            disabled={!status()?.reachable}
-          >
-            <For each={status()?.models ?? []}>
-              {(entry: Model) => (
-                <option value={entry.id} disabled={!entry.usable}>
-                  {entry.id}
-                  {entry.usable ? "" : " - no tool support"}
-                </option>
-              )}
-            </For>
-          </select>
-          <Show when={status()?.models.find((m) => m.id === model())}>
-            {(current) => (
-              <div class="status" style={{ "margin-top": "7px" }}>
-                {current().context.toLocaleString()} ctx
-                {current().thinking ? " - reasoning" : ""}
-                {current().vision ? " - vision" : ""}
-              </div>
-            )}
-          </Show>
-          {/* Embedding models are named but never offered: they index text and
-              cannot answer, so listing one as a disabled chat model would
-              imply it might become selectable. */}
-          <Show when={(status()?.embedding_models.length ?? 0) > 0}>
-            <div class="aside-note">
-              Indexing only: <code>{status()!.embedding_models.join(", ")}</code>
-            </div>
-          </Show>
-        </div>
-
-        <div>
-          <div class="section-label">Project folder</div>
-          {/* Choosing a folder is what enables writing at all: the model can
-              create and change files inside it and nowhere else. With no folder
-              chosen there is nothing to confine writes to, so it cannot write. */}
+        <div class="sidebar-content">
           <Show
-            when={projectRoot()}
+            when={!settingsOpen()}
             fallback={
-              <div class="aside-note">
-                No folder open, so the model can read and search but cannot
-                create or change any file.
+              <div class="settings-pane">
+                <div class="settings-head">
+                  <button
+                    class="linkbtn"
+                    aria-label="Back to chats"
+                    onClick={() => setSettingsOpen(false)}
+                  >
+                    ← Back
+                  </button>
+                  <strong>Settings</strong>
+                </div>
+
+                <div>
+                  <div class="section-label">Appearance</div>
+                  <label class="field-label" for="theme-select">Theme</label>
+                  <select
+                    id="theme-select"
+                    value={themeId()}
+                    onChange={(event) => setThemeId(event.currentTarget.value)}
+                  >
+                    <For each={THEMES}>
+                      {(theme) => <option value={theme.id}>{theme.name}</option>}
+                    </For>
+                  </select>
+                </div>
+
+                <div>
+                  <div class="section-label">Ollama Daemon</div>
+                  <div class="status">
+                    <span
+                      class={`status-dot ${status()?.reachable ? "up" : "down"}`}
+                      aria-hidden="true"
+                    />
+                    <span>{status()?.host ?? "checking..."}</span>
+                  </div>
+                  <Show when={status() && !status()!.reachable}>
+                    <div class="hint" style={{ "margin-top": "9px" }}>
+                      {status()!.detail}
+                    </div>
+                  </Show>
+                </div>
+
+                <div>
+                  <div class="section-label">Embeddings</div>
+                  <p class="settings-copy">
+                    These models vectorize attached documents for local retrieval
+                    and never answer chats.
+                  </p>
+                  <Show
+                    when={(status()?.embedding_models.length ?? 0) > 0}
+                    fallback={<div class="aside-note">No embedding model detected.</div>}
+                  >
+                    <select
+                      aria-label="Embedding model"
+                      value={embeddingModel()}
+                      onChange={(event) =>
+                        setEmbeddingModel(event.currentTarget.value)
+                      }
+                    >
+                      <For each={status()!.embedding_models}>
+                        {(model) => <option value={model}>{model}</option>}
+                      </For>
+                    </select>
+                  </Show>
+                </div>
               </div>
             }
           >
-            <div class="folder-path" title={projectRoot()!}>
-              {projectRoot()}
-            </div>
-            <div class="aside-note">
-              The model may edit files here, and nowhere else.
-            </div>
-          </Show>
-          <div class="folder-actions">
-            <button class="linkbtn" onClick={openFolder}>
-              {projectRoot() ? "Change folder" : "Open folder"}
-            </button>
-            <Show when={projectRoot()}>
-              <button class="linkbtn" onClick={() => setProjectRoot(null)}>
-                Close
-              </button>
-            </Show>
-          </div>
-          <Show when={folderError()}>
-            <div class="aside-note bad">{folderError()}</div>
-          </Show>
-        </div>
-
-        <div>
-          <div class="section-label">Behaviour</div>
-          <label class="toggle">
-            <input
-              type="checkbox"
-              checked={enhance()}
-              onChange={(event) => setEnhance(event.currentTarget.checked)}
-            />
-            <span class="toggle-copy">
-              <b>Multi-pass</b> - plans, works, then checks itself. Off: one
-              direct answer.
-            </span>
-          </label>
-          <label class="toggle" style={{ "margin-top": "11px" }}>
-            <input
-              type="checkbox"
-              checked={reasoning()}
-              onChange={(event) => setReasoning(event.currentTarget.checked)}
-            />
-            <span class="toggle-copy">
-              <b>Think first</b> - far slower, often 10x. The thinking is never
-              shown.
-            </span>
-          </label>
-        </div>
-
-        <Show when={enhance() && triage()}>
-          {(current) => (
-            <div class="triage">
-              <div class="triage-head">
-                <span class="section-label" style={{ margin: 0 }}>
-                  Plan
-                </span>
-                <span class={`badge ${current().complexity}`}>
-                  {current().complexity}
-                </span>
+            <div class="chats">
+              <div class="chats-head">
+                <div class="section-label" style={{ margin: 0 }}>Chats</div>
+                <button class="linkbtn" onClick={startChat}>New</button>
               </div>
-              <div class="stage-chips">
-                <For each={current().stages}>
-                  {(stage) => (
-                    <span
-                      class={`chip ${
-                        run().stage === stage.stage
-                          ? "active"
-                          : run().doneStages.includes(stage.stage)
-                            ? "done"
-                            : ""
-                      }`}
+              <div class="chats-list">
+                <For each={chats()}>
+                  {(chat) => (
+                    <div
+                      class={`chat-row ${chat.id === activeId() ? "active" : ""}`}
+                      onClick={() => openChat(chat.id)}
+                      title={chat.title}
                     >
-                      {stage.stage}
-                    </span>
+                      <Show when={isRunning(chat.id)}>
+                        <span class="spinner" style={{ margin: 0 }} />
+                      </Show>
+                      <span class="chat-title">{chat.title}</span>
+                      <button
+                        class="chat-del"
+                        title="Delete chat"
+                        aria-label={`Delete ${chat.title}`}
+                        disabled={isRunning(chat.id)}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          removeChat(chat.id)
+                        }}
+                      >
+                        &times;
+                      </button>
+                    </div>
                   )}
                 </For>
               </div>
             </div>
-          )}
-        </Show>
 
-        <div style={{ "margin-top": "auto" }}>
-          <div class="section-label">Theme</div>
-          <select
-            value={themeId()}
-            onChange={(event) => setThemeId(event.currentTarget.value)}
-          >
-            <For each={THEMES}>
-              {(theme) => <option value={theme.id}>{theme.name}</option>}
-            </For>
-          </select>
-          <div class="status" style={{ "margin-top": "10px" }}>
-            <button
-              class="linkbtn"
-              disabled={rescanning()}
-              onClick={() => void rescanModels()}
-            >
-              {rescanning() ? "Rescanning..." : "Rescan models"}
-            </button>
-            <Show when={rescanning()}>
-              <span class="spinner" aria-label="Scanning for Ollama models" />
-            </Show>
-          </div>
-          <Show when={rescanMessage()}>
-            <div class="aside-note" aria-live="polite">
-              {rescanMessage()}
+            <div>
+              <div class="section-label">Project folder</div>
+              <Show
+                when={projectRoot()}
+                fallback={
+                  <div class="aside-note">
+                    No folder open, so the model can read and search but cannot
+                    create or change any file.
+                  </div>
+                }
+              >
+                <div class="folder-path" title={projectRoot()!}>{projectRoot()}</div>
+                <div class="aside-note">
+                  The model may edit files here, and nowhere else.
+                </div>
+              </Show>
+              <div class="folder-actions">
+                <button class="linkbtn" onClick={openFolder}>
+                  {projectRoot() ? "Change folder" : "Open folder"}
+                </button>
+                <Show when={projectRoot()}>
+                  <button class="linkbtn" onClick={() => setProjectRoot(null)}>
+                    Close
+                  </button>
+                </Show>
+              </div>
+              <Show when={folderError()}>
+                <div class="aside-note bad">{folderError()}</div>
+              </Show>
             </div>
+
+            <Show when={active().enhance && triage()}>
+              {(current) => (
+                <div class="triage">
+                  <div class="triage-head">
+                    <span class="section-label" style={{ margin: 0 }}>Plan</span>
+                    <span class={`badge ${current().complexity}`}>
+                      {current().complexity}
+                    </span>
+                  </div>
+                  <div class="stage-chips">
+                    <For each={current().stages}>
+                      {(stage) => (
+                        <span
+                          class={`chip ${
+                            run().stage === stage.stage
+                              ? "active"
+                              : run().doneStages.includes(stage.stage)
+                                ? "done"
+                                : ""
+                          }`}
+                        >
+                          {stage.stage}
+                        </span>
+                      )}
+                    </For>
+                  </div>
+                </div>
+              )}
+            </Show>
           </Show>
+        </div>
+
+        <div class="sidebar-footer">
+          <button
+            class="rescan-btn"
+            disabled={rescanning()}
+            title={rescanMessage() || "Rescan Ollama models"}
+            onClick={() => void rescanModels()}
+          >
+            <Show when={rescanning()}>
+              <span class="spinner" aria-hidden="true" />
+            </Show>
+            <span aria-live="polite">
+              {rescanning() ? "Rescanning..." : rescanMessage() || "Rescan models"}
+            </span>
+          </button>
+          <button
+            class={`settings-btn ${settingsOpen() ? "active" : ""}`}
+            title={settingsOpen() ? "Close settings" : "Open settings"}
+            aria-label={settingsOpen() ? "Close settings" : "Open settings"}
+            aria-pressed={settingsOpen()}
+            onClick={() => setSettingsOpen((open) => !open)}
+          >
+            <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M19.1 13a7.4 7.4 0 0 0 .05-1 7.4 7.4 0 0 0-.05-1l2.1-1.65-2-3.46-2.54 1.02a7.8 7.8 0 0 0-1.73-1L14.55 3h-4l-.38 2.91a7.8 7.8 0 0 0-1.73 1L5.9 5.89l-2 3.46L6 11a7.4 7.4 0 0 0-.05 1 7.4 7.4 0 0 0 .05 1l-2.1 1.65 2 3.46 2.54-1.02a7.8 7.8 0 0 0 1.73 1l.38 2.91h4l.38-2.91a7.8 7.8 0 0 0 1.73-1l2.54 1.02 2-3.46L19.1 13ZM12.55 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z"
+              />
+            </svg>
+          </button>
         </div>
       </aside>
 
@@ -647,11 +691,13 @@ export default function App() {
             <div class="status">
               <span class="spinner" />
               <span>
-                {run().tool
-                  ? `running ${run().tool}...`
-                  : run().stage
-                    ? `running ${run().stage}...`
-                    : "generating locally..."}
+               {run().stopping
+                 ? "stopping..."
+                 : run().tool
+                   ? `running ${run().tool}...`
+                   : run().stage
+                     ? `running ${run().stage}...`
+                     : "generating locally..."}
                 {` ${run().elapsed}s`}
                 {run().thinkingChars > 0
                   ? ` - thinking, ${run().thinkingChars.toLocaleString()} chars so far`
@@ -696,39 +742,110 @@ export default function App() {
             onInput={(event) => setDraft(event.currentTarget.value)}
             onKeyDown={onKeyDown}
           />
-          <button
-            class="iconbtn attach"
-            title="Attach documents for local RAG"
-            aria-label="Attach documents for local RAG"
-            disabled={attaching() || runningHere()}
-            onClick={() => void attachToActive()}
-          >
-            {attaching() ? <span class="spinner" /> : "＋"}
-          </button>
-          <button
-            class={runningHere() ? "iconbtn stop" : "iconbtn send"}
-            title={runningHere() ? "Stop generating" : "Send"}
-            aria-label={runningHere() ? "Stop generating" : "Send"}
-            onClick={() =>
-              runningHere() ? void cancelTurn(activeId()) : void submit()
-            }
-            disabled={
-              !status()?.reachable || (!runningHere() && !draft().trim())
-            }
-          >
-            <Show
-              when={runningHere()}
-              fallback={
-                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-                  <path d="M8 5v14l11-7z" fill="currentColor" />
-                </svg>
-              }
-            >
-              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-                <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" />
-              </svg>
-            </Show>
-          </button>
+          <div class="composer-toolbar">
+            <div class="composer-options">
+              <select
+                class="chat-model"
+                aria-label="Chat model"
+                title="Model used by this chat"
+                value={active().model}
+                disabled={runningHere() || !status()?.reachable}
+                onChange={(event) => {
+                  const model = event.currentTarget.value
+                  patch(activeId(), (chat) => ({ ...chat, model }))
+                }}
+              >
+                <For each={status()?.models ?? []}>
+                  {(entry: Model) => (
+                    <option value={entry.id} disabled={!entry.usable}>
+                      {entry.id}{entry.usable ? "" : " - no tool support"}
+                    </option>
+                  )}
+                </For>
+              </select>
+              <label
+                class="compact-toggle"
+                title="Plans, works, then checks itself. Off: one direct answer."
+              >
+                <input
+                  type="checkbox"
+                  checked={active().enhance}
+                  disabled={runningHere()}
+                  onChange={(event) => {
+                    const enhance = event.currentTarget.checked
+                    patch(activeId(), (chat) => ({ ...chat, enhance }))
+                  }}
+                />
+                Multi-pass
+              </label>
+              <label
+                class="compact-toggle"
+                title="Far slower, often 10x. The thinking is never shown."
+              >
+                <input
+                  type="checkbox"
+                  checked={active().reasoning}
+                  disabled={runningHere()}
+                  onChange={(event) => {
+                    const reasoning = event.currentTarget.checked
+                    patch(activeId(), (chat) => ({ ...chat, reasoning }))
+                  }}
+                />
+                Think-first
+              </label>
+            </div>
+            <div class="composer-actions">
+              <button
+                class="iconbtn attach"
+                title={
+                  embeddingModel()
+                    ? "Attach documents for local retrieval"
+                    : "Install or select an embedding model in Settings to attach documents"
+                }
+                aria-label="Attach documents for local retrieval"
+                disabled={attaching() || runningHere() || !embeddingModel()}
+                onClick={() => void attachToActive()}
+              >
+                {attaching() ? <span class="spinner" /> : "＋"}
+              </button>
+              <button
+                class={runningHere() ? "iconbtn stop" : "iconbtn send"}
+                title={
+                  runningHere()
+                    ? run().stopping
+                      ? "Stopping"
+                      : "Stop generating"
+                    : "Send"
+                }
+                aria-label={
+                  runningHere()
+                    ? run().stopping
+                      ? "Stopping"
+                      : "Stop generating"
+                    : "Send"
+                }
+                onClick={() => (runningHere() ? stopActive() : void submit())}
+                disabled={
+                  runningHere()
+                    ? run().stopping
+                    : !status()?.reachable || !draft().trim() || !active().model
+                }
+              >
+                <Show
+                  when={runningHere()}
+                  fallback={
+                    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                      <path d="M8 5v14l11-7z" fill="currentColor" />
+                    </svg>
+                  }
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                    <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" />
+                  </svg>
+                </Show>
+              </button>
+            </div>
+          </div>
         </div>
       </main>
     </div>

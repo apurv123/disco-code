@@ -14,7 +14,6 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -42,18 +41,18 @@ pub struct AttachmentDto {
 /// the stop button has to abandon the turn the user is actually looking at. A
 /// local model can spend minutes in a hidden scratchpad, so a turn that cannot
 /// be abandoned is a turn that holds the interface hostage.
-fn cancel_flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
-    static FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+fn cancel_flags() -> &'static Mutex<HashMap<String, Arc<agent::CancelToken>>> {
+    static FLAGS: OnceLock<Mutex<HashMap<String, Arc<agent::CancelToken>>>> = OnceLock::new();
     FLAGS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Begin a turn for one conversation, cancelling any earlier turn in that same
 /// conversation only.
-fn begin_turn(turn_id: &str) -> Arc<AtomicBool> {
-    let token = Arc::new(AtomicBool::new(false));
+fn begin_turn(turn_id: &str) -> Arc<agent::CancelToken> {
+    let token = Arc::new(agent::CancelToken::new());
     if let Ok(mut flags) = cancel_flags().lock() {
         if let Some(previous) = flags.insert(turn_id.to_string(), Arc::clone(&token)) {
-            previous.store(true, Ordering::SeqCst);
+            previous.cancel();
         }
     }
     token
@@ -63,7 +62,7 @@ fn begin_turn(turn_id: &str) -> Arc<AtomicBool> {
 ///
 /// Only removes the entry when it is still the one this turn registered: a
 /// newer turn for the same conversation must keep its own flag.
-fn end_turn(turn_id: &str, token: &Arc<AtomicBool>) {
+fn end_turn(turn_id: &str, token: &Arc<agent::CancelToken>) {
     if let Ok(mut flags) = cancel_flags().lock() {
         if flags
             .get(turn_id)
@@ -79,7 +78,7 @@ fn end_turn(turn_id: &str, token: &Arc<AtomicBool>) {
 pub fn cancel_turn(turn_id: String) {
     if let Ok(flags) = cancel_flags().lock() {
         if let Some(token) = flags.get(&turn_id) {
-            token.store(true, Ordering::SeqCst);
+            token.cancel();
         }
     }
 }
@@ -327,6 +326,7 @@ pub async fn send_prompt(
     reasoning: bool,
     project_root: Option<String>,
     has_attachments: bool,
+    embedding_model: Option<String>,
 ) -> Result<(), String> {
     // A folder that has gone away since it was chosen fails the turn rather
     // than silently falling back to writing somewhere the user is not looking.
@@ -344,6 +344,7 @@ pub async fn send_prompt(
         &app,
         &turn_id,
         has_attachments,
+        embedding_model.as_deref(),
         workspace.as_ref(),
         &cancel,
     )
@@ -503,7 +504,11 @@ fn attachment_dir(app: &tauri::AppHandle, chat_id: &str) -> Result<PathBuf, Stri
     Ok(root.join("attachments").join(id))
 }
 
-fn rag_db_path(app: &tauri::AppHandle, chat_id: &str) -> Result<PathBuf, String> {
+fn rag_db_path(
+    app: &tauri::AppHandle,
+    chat_id: &str,
+    embedding_model: &str,
+) -> Result<PathBuf, String> {
     use tauri::Manager;
 
     let id = safe_chat_id(chat_id)?;
@@ -514,7 +519,9 @@ fn rag_db_path(app: &tauri::AppHandle, chat_id: &str) -> Result<PathBuf, String>
     let dir = root.join("rag");
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("Could not create the RAG index directory: {error}"))?;
-    Ok(dir.join(format!("{id}.sqlite")))
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    embedding_model.hash(&mut hasher);
+    Ok(dir.join(format!("{id}-{:08x}.sqlite", hasher.finish() as u32)))
 }
 
 fn safe_chat_id(chat_id: &str) -> Result<String, String> {
@@ -562,6 +569,7 @@ async fn retrieve_attachment_context(
     app: &tauri::AppHandle,
     chat_id: &str,
     request: &str,
+    embedding_model: &str,
     channel: &tauri::ipc::Channel<TurnEvent>,
 ) -> Result<String, String> {
     let attachments = attachment_dir(app, chat_id)?;
@@ -574,8 +582,9 @@ async fn retrieve_attachment_context(
         summary: "indexing and searching attached documents".to_string(),
     });
 
-    let db = rag_db_path(app, chat_id)?;
+    let db = rag_db_path(app, chat_id, embedding_model)?;
     let query = request.to_string();
+    let embedding_model = embedding_model.to_string();
     // rusqlite connections are intentionally not Sync. The RAG ingestion
     // future keeps one across embedding awaits, so it cannot live inside the
     // Send future Tauri requires for commands. Give it a dedicated blocking
@@ -588,7 +597,10 @@ async fn retrieve_attachment_context(
             .map_err(|error| format!("Could not start document indexing: {error}"))?;
         runtime.block_on(async move {
             let client = reqwest_client();
-            let config = claw_rag_service::EmbedConfig::from_env()?;
+            let config = claw_rag_service::EmbedConfig {
+                base_url: api::ollama_base(),
+                model: embedding_model,
+            };
             claw_rag_service::run_ingest(std::slice::from_ref(&attachments), &db, &config, &client)
                 .await?;
             claw_rag_service::query_index(
@@ -659,11 +671,31 @@ async fn run_turn(
     app: &tauri::AppHandle,
     chat_id: &str,
     has_attachments: bool,
+    embedding_model: Option<&str>,
     workspace: Option<&Workspace>,
-    cancel: &Arc<AtomicBool>,
+    cancel: &Arc<agent::CancelToken>,
 ) -> Result<(), String> {
     let enriched_request = if has_attachments {
-        retrieve_attachment_context(app, chat_id, request, channel).await?
+        let embedding_model = embedding_model
+            .filter(|model| !model.trim().is_empty())
+            .ok_or_else(|| {
+                "Attached-document search needs an embedding model. Open Settings, rescan models, \
+                 and select one under Embeddings."
+                    .to_string()
+            })?;
+        tokio::select! {
+            () = cancel.cancelled() => {
+                let _ = channel.send(TurnEvent::Cancelled);
+                return Ok(());
+            }
+            result = retrieve_attachment_context(
+                app,
+                chat_id,
+                request,
+                embedding_model,
+                channel,
+            ) => result?,
+        }
     } else {
         request.to_string()
     };
@@ -708,7 +740,7 @@ async fn run_turn(
     let mut carry: Vec<(runtime::enhance::Stage, String)> = Vec::new();
 
     for (index, stage) in stages.iter().enumerate() {
-        if cancel.load(Ordering::SeqCst) {
+        if cancel.is_cancelled() {
             let _ = channel.send(TurnEvent::Cancelled);
             return Ok(());
         }
