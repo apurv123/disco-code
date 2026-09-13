@@ -68,6 +68,37 @@ body {
   flex-direction: column;
   gap: 18px;
   overflow-y: auto;
+  /* Keep the content edge clean until there is actually something to scroll.
+     Firefox and Chromium/WebView2 use different scrollbar APIs, so both are
+     supplied. */
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.sidebar-content:hover {
+  scrollbar-color: color-mix(in srgb, var(--primary) 55%, transparent) transparent;
+}
+
+.sidebar-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar-content::-webkit-scrollbar-thumb {
+  min-height: 36px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.sidebar-content:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--primary) 55%, transparent);
+}
+
+.sidebar-content::-webkit-scrollbar-thumb:hover {
+  background: var(--primary);
 }
 
 .settings-pane {
@@ -106,10 +137,10 @@ body {
 .rescan-btn,
 .settings-btn {
   height: 36px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--primary);
   border-radius: 7px;
-  background: transparent;
-  color: var(--text-weak);
+  background: var(--primary);
+  color: var(--bg);
   padding: 0 10px;
 }
 
@@ -137,8 +168,8 @@ body {
 .rescan-btn:hover:not(:disabled),
 .settings-btn:hover:not(:disabled),
 .settings-btn.active {
-  color: var(--text);
-  border-color: var(--primary);
+  color: var(--bg);
+  filter: brightness(1.12);
 }
 
 .brand {
@@ -551,8 +582,9 @@ button:disabled {
 }
 
 .iconbtn.send {
-  background: var(--accent);
-  color: var(--bg-panel);
+  background: var(--primary);
+  color: var(--bg);
+  border-color: var(--primary);
 }
 
 .iconbtn.attach {
