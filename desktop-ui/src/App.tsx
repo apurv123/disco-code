@@ -585,15 +585,25 @@ export default function App() {
               {(current) => (
                 <div class="triage">
                   <div class="triage-head">
-                    <span class="section-label" style={{ margin: 0 }}>Plan</span>
-                    <span class={`badge ${current().complexity}`}>
+                    <span class="section-label" style={{ margin: 0 }}>
+                      Multi-pass route
+                    </span>
+                    <span
+                      class={`badge ${current().complexity}`}
+                      title="Automatically detected request complexity"
+                    >
                       {current().complexity}
                     </span>
+                  </div>
+                  <div class="route-copy">
+                    Selected automatically. These stages run in order and highlight
+                    as work progresses. Turn off Multi-pass below for one direct answer.
                   </div>
                   <div class="stage-chips">
                     <For each={current().stages}>
                       {(stage) => (
                         <span
+                          title={stage.directive}
                           class={`chip ${
                             run().stage === stage.stage
                               ? "active"
