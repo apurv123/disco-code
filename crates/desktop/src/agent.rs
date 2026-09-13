@@ -153,6 +153,9 @@ pub fn system_prompt(today: &str, workspace: Option<&Workspace>) -> String {
             "- The project folder is {}. You can create and change files in it with write_file \
              and edit_file, using paths relative to that folder. You cannot touch anything \
              outside it.\n\
+             - Questions about 'this folder', 'this project', the repository, or the codebase \
+             refer to that local project folder. Inspect it with glob_search, then read relevant \
+             files such as README and manifests. Never WebSearch for a local folder path.\n\
              - Read a file before editing it, so you do not overwrite work you have not seen.\n",
             workspace.label()
         ),
@@ -203,6 +206,14 @@ pub async fn run(
     let mut messages = vec![InputMessage::user_text(first)];
     let mut transcript = String::new();
     let mut last_web_url: Option<String> = None;
+
+    if let Some(workspace) = workspace.filter(|_| is_project_inspection_request(&messages)) {
+        let evidence = inspect_project(workspace, cancel, sink).await?;
+        messages.push(InputMessage::user_text(format!(
+            "Use this evidence from the open local project to answer the original request. \
+             Do not WebSearch for the project folder.\n\n{evidence}"
+        )));
+    }
 
     for step in 0..MAX_STEPS {
         if cancel.is_cancelled() {
@@ -344,6 +355,90 @@ pub async fn run(
     })
 }
 
+fn is_project_inspection_request(messages: &[InputMessage]) -> bool {
+    let Some(InputContentBlock::Text { text }) =
+        messages.first().and_then(|message| message.content.first())
+    else {
+        return false;
+    };
+    let text = text.to_ascii_lowercase();
+    let asks_to_understand = [
+        "what does",
+        "what is",
+        "explain",
+        "describe",
+        "summarize",
+        "summarise",
+        "tell me about",
+        "purpose",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase));
+    let names_local_project = ["this folder", "this project", "this repo", "repository", "codebase"]
+        .iter()
+        .any(|phrase| text.contains(phrase));
+    asks_to_understand && names_local_project
+}
+
+async fn inspect_project(
+    workspace: &Workspace,
+    cancel: &Arc<CancelToken>,
+    sink: &dyn Sink,
+) -> Result<String, String> {
+    let mut evidence = String::new();
+    let listing = ToolCall {
+        id: "project_inventory".to_string(),
+        name: "glob_search".to_string(),
+        input: serde_json::json!({ "pattern": "*", "path": "." }),
+    };
+    sink.tool_start(&listing.name, "project root");
+    let (output, is_error) = tokio::select! {
+        () = cancel.cancelled() => return Ok("Project inspection was cancelled.".to_string()),
+        result = execute(&listing, Some(workspace)) => result,
+    };
+    sink.tool_end(&listing.name, !is_error, &first_line(&output));
+    if !is_error {
+        evidence.push_str("--- Project root files ---\n");
+        evidence.push_str(&truncate(&output));
+        evidence.push('\n');
+    }
+
+    for name in [
+        "README.md",
+        "README",
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+    ] {
+        if !workspace.root().join(name).is_file() {
+            continue;
+        }
+        let call = ToolCall {
+            id: format!("project_context_{name}"),
+            name: "read_file".to_string(),
+            input: serde_json::json!({ "path": name }),
+        };
+        sink.tool_start(&call.name, name);
+        let (output, is_error) = tokio::select! {
+            () = cancel.cancelled() => return Ok("Project inspection was cancelled.".to_string()),
+            result = execute(&call, Some(workspace)) => result,
+        };
+        sink.tool_end(&call.name, !is_error, &first_line(&output));
+        if !is_error {
+            evidence.push_str(&format!("\n--- {name} ---\n"));
+            evidence.push_str(&truncate(&output));
+            evidence.push('\n');
+        }
+    }
+
+    if evidence.is_empty() {
+        Err("Could not inspect the open project folder.".to_string())
+    } else {
+        Ok(evidence)
+    }
+}
+
 struct StepResult {
     text: String,
     calls: Vec<ToolCall>,
@@ -360,6 +455,24 @@ fn normalize_tool_call(
     last_web_url: Option<&str>,
     workspace: Option<&Workspace>,
 ) {
+    // Qwen occasionally tries to web-search the literal local Windows path
+    // when asked what the open folder contains. A local path has no useful web
+    // result; inspect the selected workspace root instead.
+    if call.name == "WebSearch" {
+        if let (Some(query), Some(workspace)) = (
+            call.input.get("query").and_then(Value::as_str),
+            workspace,
+        ) {
+            let query = query.replace('/', "\\").to_ascii_lowercase();
+            let root = workspace.label().replace('/', "\\").to_ascii_lowercase();
+            if query.contains(&root) {
+                call.name = "glob_search".to_string();
+                call.input = serde_json::json!({ "pattern": "*" });
+                return;
+            }
+        }
+    }
+
     let path = call
         .input
         .get("path")
@@ -443,7 +556,34 @@ fn local_path_exists(candidate: &str, workspace: Option<&Workspace>) -> bool {
 /// Only names the model was actually offered are accepted, so arbitrary JSON in
 /// an answer cannot be turned into a tool call.
 fn salvage(text: &str, known: &BTreeSet<String>) -> Option<ToolCall> {
-    let body = strip_wrappers(text.trim());
+    if let Some(call) = parse_text_tool_call(strip_wrappers(text.trim()), known) {
+        return Some(call);
+    }
+
+    // Qwen sometimes narrates the intended tool first, then emits the actual
+    // call in a fenced JSON block. The envelope is still unambiguous and must
+    // not be rendered as an answer.
+    for marker in ["```json", "```"] {
+        if let Some((_, tail)) = text.split_once(marker) {
+            let body = tail.split_once("```").map_or(tail, |(body, _)| body);
+            if let Some(call) = parse_text_tool_call(body.trim(), known) {
+                return Some(call);
+            }
+        }
+    }
+    if let Some((_, tail)) = text.split_once("<tool_call>") {
+        let body = tail
+            .split_once("</tool_call>")
+            .map_or(tail, |(body, _)| body);
+        if let Some(call) = parse_text_tool_call(body.trim(), known) {
+            return Some(call);
+        }
+    }
+
+    None
+}
+
+fn parse_text_tool_call(body: &str, known: &BTreeSet<String>) -> Option<ToolCall> {
     let parsed: Value = serde_json::from_str(body).ok()?;
 
     let name = parsed.get("name")?.as_str()?.to_string();
@@ -524,6 +664,10 @@ async fn stream_step(
     let mut text = String::new();
     let mut emitted = 0usize;
     let mut pending: Vec<(u32, String, String, String)> = Vec::new();
+    // Qwen is known to encode tool calls as response text, sometimes after a
+    // prose preamble. Buffer its step until the envelope can be classified so
+    // neither the narration nor raw JSON leaks into the transcript.
+    let defer_text = request.model.to_ascii_lowercase().contains("qwen");
 
     loop {
         if cancel.is_cancelled() {
@@ -557,7 +701,7 @@ async fn stream_step(
                     text.push_str(&chunk);
                     // Held back while the text might turn out to be a tool call
                     // written as content; released below if it is not.
-                    if !looks_like_tool_json(&text) {
+                    if !defer_text && !looks_like_tool_json(&text) {
                         sink.text(&text[emitted..]);
                         emitted = text.len();
                     }
@@ -826,6 +970,18 @@ mod tests {
     }
 
     #[test]
+    fn narrated_fenced_tool_call_is_recovered() {
+        let known: BTreeSet<String> = ["WebSearch".to_string()].into_iter().collect();
+        let raw = "WebSearch What is this folder?\n```json\n\
+                   {\"name\":\"WebSearch\",\"arguments\":{\"query\":\"purpose of D:\\\\Code\"}}\n\
+                   ```";
+
+        let call = salvage(raw, &known).expect("the fenced call must survive its prose preamble");
+        assert_eq!(call.name, "WebSearch");
+        assert_eq!(call.input["query"], r"purpose of D:\Code");
+    }
+
+    #[test]
     fn double_encoded_arguments_are_decoded() {
         let known: BTreeSet<String> = ["WebSearch".to_string()].into_iter().collect();
         let raw = r#"{"name": "WebSearch", "arguments": "{\"query\": \"news\"}"}"#;
@@ -895,6 +1051,24 @@ mod tests {
 
         assert_eq!(call.name, original.name);
         assert_eq!(call.input, original.input);
+    }
+
+    #[test]
+    fn a_web_search_for_the_open_folder_becomes_local_inspection() {
+        let workspace = project("inspect-me");
+        let mut call = ToolCall {
+            id: "call-local".to_string(),
+            name: "WebSearch".to_string(),
+            input: serde_json::json!({
+                "query": format!("purpose of {}", workspace.label())
+            }),
+        };
+
+        normalize_tool_call(&mut call, None, Some(&workspace));
+
+        assert_eq!(call.name, "glob_search");
+        assert_eq!(call.input, serde_json::json!({ "pattern": "*" }));
+        assert_eq!(call.id, "call-local");
     }
 
     #[test]
@@ -1057,6 +1231,58 @@ mod tests {
             !outcome.text.trim().is_empty(),
             "the loop produced no answer at all"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a running Ollama daemon"]
+    async fn a_question_about_the_open_project_inspects_local_files() {
+        let root = std::env::temp_dir().join(format!(
+            "disco-project-inspection-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("README.md"),
+            "# Lantern\n\nLantern validates lunar navigation archives.\n",
+        )
+        .unwrap();
+        let workspace = Workspace::open(root.to_str().unwrap()).unwrap();
+        let model = std::env::var("DISCO_TEST_MODEL")
+            .unwrap_or_else(|_| "qwen2.5-coder:7b".to_string());
+        let client = api::ProviderClient::from_model(&model).expect("client");
+        let cancel = Arc::new(CancelToken::new());
+        let recorder = Recorder::default();
+
+        let outcome = run(
+            &client,
+            &model,
+            system_prompt("2026-09-13", Some(&workspace)),
+            "What does this folder do? Answer in one sentence.".to_string(),
+            false,
+            Some(&workspace),
+            &cancel,
+            &recorder,
+        )
+        .await
+        .expect("the loop ran");
+
+        let tools = recorder.tools.lock().unwrap().clone();
+        assert!(
+            tools.iter().any(|name| name == "glob_search" || name == "read_file"),
+            "the model did not inspect the project: {tools:?}; answer: {}",
+            outcome.text
+        );
+        assert!(
+            !tools.iter().any(|name| name == "WebSearch"),
+            "a local project question escaped to web search: {tools:?}"
+        );
+        assert!(
+            outcome.text.to_ascii_lowercase().contains("lunar navigation"),
+            "the answer did not use the README: {}",
+            outcome.text
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A local model may spend a long time before its next visible token. Stop

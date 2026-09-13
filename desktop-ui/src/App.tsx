@@ -614,15 +614,12 @@ export default function App() {
                   }
                 >
                   <div class={`msg ${entry.role}`}>
-                    <Show when={entry.stage}>
-                      <div class="stage-marker">{entry.stage}</div>
-                    </Show>
                     <div class="msg-role">
                       {entry.role === "user"
                         ? "You"
                         : entry.role === "error"
                           ? "Failed"
-                          : "Disco Code"}
+                          : entry.stage ?? "Disco Code"}
                     </div>
                     <div class="msg-body">{entry.text}</div>
                   </div>

@@ -168,6 +168,8 @@ pub enum Signal {
     ConcreteTarget,
     /// A named small edit: typo, rename, comment.
     NarrowEdit,
+    /// Requests an explanation or summary rather than a change.
+    Informational,
 }
 
 impl Signal {
@@ -181,6 +183,7 @@ impl Signal {
             Self::MultiPart => "multiple requests",
             Self::ConcreteTarget => "concrete target",
             Self::NarrowEdit => "narrow edit",
+            Self::Informational => "informational request",
         }
     }
 }
@@ -296,6 +299,20 @@ const NARROW_EDITS: &[&str] = &[
     "changelog entry",
 ];
 
+const INFORMATIONAL_PREFIXES: &[&str] = &[
+    "what is ",
+    "what does ",
+    "how does ",
+    "why does ",
+    "where is ",
+    "which ",
+    "explain ",
+    "describe ",
+    "summarize ",
+    "summarise ",
+    "tell me about ",
+];
+
 /// Words that point at something the request never introduces.
 const DANGLING: &[&str] = &["fix it", "fix this", "update it", "change it", "do it", "make it work"];
 
@@ -334,6 +351,12 @@ pub fn triage(request: &str) -> Triage {
     if NARROW_EDITS.iter().any(|n| trimmed.contains(n)) {
         signals.push(Signal::NarrowEdit);
     }
+    if INFORMATIONAL_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+    {
+        signals.push(Signal::Informational);
+    }
 
     signals.sort_unstable();
     signals.dedup();
@@ -355,6 +378,7 @@ fn classify(signals: &[Signal], words: usize) -> Complexity {
     let risky = signals.contains(&Signal::Irreversible);
     let narrow = signals.contains(&Signal::NarrowEdit);
     let concrete = signals.contains(&Signal::ConcreteTarget);
+    let informational = signals.contains(&Signal::Informational);
 
     // Risk dominates. A dangerous request is worth the full loop even when it
     // is precisely stated - especially then, since a precise instruction to do
@@ -364,6 +388,11 @@ fn classify(signals: &[Signal], words: usize) -> Complexity {
     }
     if vague || signals.contains(&Signal::MultiPart) {
         return Complexity::Complex;
+    }
+    // Explanations still need tools and evidence, but planning and verifying a
+    // code change that was never requested produces irrelevant ceremony.
+    if informational {
+        return Complexity::Trivial;
     }
     // A named small edit against a named target needs no ceremony.
     if narrow && concrete {
@@ -736,6 +765,14 @@ mod tests {
         assert_eq!(t.complexity, Complexity::Standard);
         assert_eq!(t.stages, vec![Stage::Plan, Stage::Execute, Stage::Verify]);
         assert!(!t.runs(Stage::Clarify));
+    }
+
+    #[test]
+    fn a_question_about_the_project_uses_one_evidence_gathering_pass() {
+        let t = triage("What does this folder do?");
+        assert_eq!(t.complexity, Complexity::Trivial);
+        assert_eq!(t.stages, vec![Stage::Execute]);
+        assert!(t.has(Signal::Informational));
     }
 
     #[test]

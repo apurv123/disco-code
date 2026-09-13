@@ -312,14 +312,6 @@ textarea:focus {
   color: var(--error);
 }
 
-.stage-marker {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--primary);
-  margin: 6px 0 4px;
-}
-
 .composer {
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
