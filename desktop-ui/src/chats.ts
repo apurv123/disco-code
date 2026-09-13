@@ -13,10 +13,12 @@
  */
 
 export type Entry = {
-  role: "user" | "assistant" | "error"
+  role: "user" | "assistant" | "error" | "tool"
   text: string
   /** Set when the harness produced this text during a named stage. */
   stage?: string
+  /** Tool entries only: false once the call has come back with an error. */
+  ok?: boolean
 }
 
 export type Chat = {

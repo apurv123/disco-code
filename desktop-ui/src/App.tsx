@@ -18,6 +18,23 @@ import {
 } from "./chats"
 import { applyTheme, DEFAULT_THEME_ID, THEMES } from "./theme"
 
+/** Live progress for one chat's turn. Absent when that chat is idle. */
+type Run = {
+  stage: string | null
+  doneStages: string[]
+  thinkingChars: number
+  elapsed: number
+  tool: string | null
+}
+
+const IDLE: Run = {
+  stage: null,
+  doneStages: [],
+  thinkingChars: 0,
+  elapsed: 0,
+  tool: null,
+}
+
 /** Debounce so triage runs on a settled request, not on every keystroke. */
 function useDebounced<T>(source: () => T, delay: number): () => T {
   const [value, setValue] = createSignal(source())
@@ -44,27 +61,20 @@ export default function App() {
   )
   const [activeId, setActiveId] = createSignal(chats()[0]!.id)
 
-  // The chat whose turn is in flight, or null. One turn runs at a time: the
-  // core cancels any predecessor when a new one starts, so pretending
-  // otherwise here would quietly lose a reply.
-  const [busyChat, setBusyChat] = createSignal<string | null>(null)
+  // Keyed by chat: conversations run independently, so a turn started in one
+  // must not block or cancel a turn in another.
+  const [runs, setRuns] = createSignal<Record<string, Run>>({})
 
-  const [activeStage, setActiveStage] = createSignal<string | null>(null)
-  const [doneStages, setDoneStages] = createSignal<string[]>([])
   const [themeId, setThemeId] = createSignal(DEFAULT_THEME_ID)
   const [triage, setTriage] = createSignal<Triage | null>(null)
-  // Reasoning text is never shown, but its volume is: a local model can spend
-  // minutes in a hidden scratchpad, and a spinner with no numbers behind it is
-  // indistinguishable from a hang.
-  const [thinkingChars, setThinkingChars] = createSignal(0)
-  const [elapsed, setElapsed] = createSignal(0)
 
   let transcriptRef: HTMLDivElement | undefined
 
   const active = (): Chat => chats().find((c) => c.id === activeId()) ?? chats()[0]!
   const entries = (): Entry[] => active().entries
-  const running = (): boolean => busyChat() !== null
-  const runningHere = (): boolean => busyChat() === activeId()
+  const isRunning = (id: string): boolean => runs()[id] !== undefined
+  const runningHere = (): boolean => isRunning(activeId())
+  const run = (): Run => runs()[activeId()] ?? IDLE
 
   onMount(() => {
     const theme = THEMES.find((t) => t.id === DEFAULT_THEME_ID)
@@ -100,6 +110,10 @@ export default function App() {
     queueMicrotask(() => {
       if (transcriptRef) transcriptRef.scrollTop = transcriptRef.scrollHeight
     })
+  }
+
+  const patchRun = (id: string, edit: (run: Run) => Run) => {
+    setRuns((prev) => (prev[id] ? { ...prev, [id]: edit(prev[id]!) } : prev))
   }
 
   /** Rewrites one chat in place, leaving the others untouched. */
@@ -146,7 +160,7 @@ export default function App() {
   const removeChat = (id: string) => {
     // A running turn writes into its originating chat, so that chat must not
     // be removed out from under it.
-    if (busyChat() === id) return
+    if (isRunning(id)) return
     setChats((prev) => {
       const next = prev.filter((c) => c.id !== id)
       return next.length > 0 ? next : [emptyChat()]
@@ -156,9 +170,10 @@ export default function App() {
 
   const submit = async () => {
     const request = draft().trim()
-    if (!request || running() || !model()) return
-
     const id = activeId()
+    // Only this chat has to be idle. Other chats may be mid-turn.
+    if (!request || isRunning(id) || !model()) return
+
     patch(id, (chat) => ({
       ...chat,
       title: chat.entries.length === 0 ? titleFrom(request) : chat.title,
@@ -167,34 +182,57 @@ export default function App() {
     }))
 
     setDraft("")
-    setBusyChat(id)
-    setActiveStage(null)
-    setDoneStages([])
-    setThinkingChars(0)
-    setElapsed(0)
+    setRuns((prev) => ({ ...prev, [id]: { ...IDLE } }))
+
     const startedAt = Date.now()
-    const ticker = setInterval(
-      () => setElapsed(Math.round((Date.now() - startedAt) / 1000)),
-      1000,
-    )
+    const ticker = setInterval(() => {
+      patchRun(id, (current) => ({
+        ...current,
+        elapsed: Math.round((Date.now() - startedAt) / 1000),
+      }))
+    }, 1000)
     scrollDown()
 
     const onEvent = (event: TurnEvent) => {
       switch (event.kind) {
-        case "stage_start": {
-          const previous = activeStage()
-          if (previous) setDoneStages((prev) => [...prev, previous])
-          setActiveStage(event.stage)
+        case "stage_start":
+          patchRun(id, (current) => ({
+            ...current,
+            doneStages: current.stage
+              ? [...current.doneStages, current.stage]
+              : current.doneStages,
+            stage: event.stage,
+          }))
           break
-        }
         case "text":
-          appendToLast(id, event.text, activeStage())
+          appendToLast(id, event.text, runs()[id]?.stage ?? null)
           break
         case "thinking":
           // Reasoning is deliberately not rendered as answer text: presenting a
           // model's scratchpad as its conclusion is how wrong answers look
           // confident. Its size is still reported, as proof of progress.
-          setThinkingChars((prev) => prev + event.text.length)
+          patchRun(id, (current) => ({
+            ...current,
+            thinkingChars: current.thinkingChars + event.text.length,
+          }))
+          break
+        case "tool_start":
+          patchRun(id, (current) => ({ ...current, tool: event.name }))
+          push(id, {
+            role: "tool",
+            text: `${event.name}: ${event.summary}`,
+            ok: true,
+          })
+          break
+        case "tool_end":
+          patchRun(id, (current) => ({ ...current, tool: null }))
+          if (!event.ok) {
+            push(id, {
+              role: "tool",
+              text: `${event.name} failed: ${event.detail}`,
+              ok: false,
+            })
+          }
           break
         case "failed":
           push(id, { role: "error", text: event.message })
@@ -208,14 +246,17 @@ export default function App() {
     }
 
     try {
-      await sendPrompt(request, model(), enhance(), reasoning(), onEvent)
+      await sendPrompt(id, request, model(), enhance(), reasoning(), onEvent)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       push(id, { role: "error", text: message })
     } finally {
       clearInterval(ticker)
-      setBusyChat(null)
-      setActiveStage(null)
+      setRuns((prev) => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
       scrollDown()
     }
   }
@@ -252,7 +293,7 @@ export default function App() {
                   onClick={() => openChat(chat.id)}
                   title={chat.title}
                 >
-                  <Show when={busyChat() === chat.id}>
+                  <Show when={isRunning(chat.id)}>
                     <span class="spinner" style={{ margin: 0 }} />
                   </Show>
                   <span class="chat-title">{chat.title}</span>
@@ -260,7 +301,7 @@ export default function App() {
                     class="chat-del"
                     title="Delete chat"
                     aria-label={`Delete ${chat.title}`}
-                    disabled={busyChat() === chat.id}
+                    disabled={isRunning(chat.id)}
                     onClick={(event) => {
                       event.stopPropagation()
                       removeChat(chat.id)
@@ -367,9 +408,9 @@ export default function App() {
                   {(stage) => (
                     <span
                       class={`chip ${
-                        activeStage() === stage.stage
+                        run().stage === stage.stage
                           ? "active"
-                          : doneStages().includes(stage.stage)
+                          : run().doneStages.includes(stage.stage)
                             ? "done"
                             : ""
                       }`}
@@ -418,19 +459,28 @@ export default function App() {
           >
             <For each={entries()}>
               {(entry) => (
-                <div class={`msg ${entry.role}`}>
-                  <Show when={entry.stage}>
-                    <div class="stage-marker">{entry.stage}</div>
-                  </Show>
-                  <div class="msg-role">
-                    {entry.role === "user"
-                      ? "You"
-                      : entry.role === "error"
-                        ? "Failed"
-                        : "Disco Code"}
+                <Show
+                  when={entry.role !== "tool"}
+                  fallback={
+                    <div class={`toolrow ${entry.ok === false ? "bad" : ""}`}>
+                      {entry.text}
+                    </div>
+                  }
+                >
+                  <div class={`msg ${entry.role}`}>
+                    <Show when={entry.stage}>
+                      <div class="stage-marker">{entry.stage}</div>
+                    </Show>
+                    <div class="msg-role">
+                      {entry.role === "user"
+                        ? "You"
+                        : entry.role === "error"
+                          ? "Failed"
+                          : "Disco Code"}
+                    </div>
+                    <div class="msg-body">{entry.text}</div>
                   </div>
-                  <div class="msg-body">{entry.text}</div>
-                </div>
+                </Show>
               )}
             </For>
           </Show>
@@ -439,12 +489,14 @@ export default function App() {
             <div class="status">
               <span class="spinner" />
               <span>
-                {activeStage()
-                  ? `running ${activeStage()}...`
-                  : "generating locally..."}
-                {` ${elapsed()}s`}
-                {thinkingChars() > 0
-                  ? ` - thinking, ${thinkingChars().toLocaleString()} chars so far`
+                {run().tool
+                  ? `running ${run().tool}...`
+                  : run().stage
+                    ? `running ${run().stage}...`
+                    : "generating locally..."}
+                {` ${run().elapsed}s`}
+                {run().thinkingChars > 0
+                  ? ` - thinking, ${run().thinkingChars.toLocaleString()} chars so far`
                   : ""}
               </span>
             </div>
@@ -454,11 +506,9 @@ export default function App() {
         <div class="composer">
           <textarea
             placeholder={
-              !status()?.reachable
-                ? "Start Ollama to begin."
-                : running() && !runningHere()
-                  ? "Another chat is generating. Stop it, or wait."
-                  : "Ask for a change. Shift+Enter for a new line."
+              status()?.reachable
+                ? "Ask for a change. Shift+Enter for a new line."
+                : "Start Ollama to begin."
             }
             value={draft()}
             disabled={!status()?.reachable}
@@ -466,14 +516,18 @@ export default function App() {
             onKeyDown={onKeyDown}
           />
           <button
-            class={running() ? "iconbtn stop" : "iconbtn send"}
-            title={running() ? "Stop generating" : "Send"}
-            aria-label={running() ? "Stop generating" : "Send"}
-            onClick={() => (running() ? void cancelTurn() : void submit())}
-            disabled={!status()?.reachable || (!running() && !draft().trim())}
+            class={runningHere() ? "iconbtn stop" : "iconbtn send"}
+            title={runningHere() ? "Stop generating" : "Send"}
+            aria-label={runningHere() ? "Stop generating" : "Send"}
+            onClick={() =>
+              runningHere() ? void cancelTurn(activeId()) : void submit()
+            }
+            disabled={
+              !status()?.reachable || (!runningHere() && !draft().trim())
+            }
           >
             <Show
-              when={running()}
+              when={runningHere()}
               fallback={
                 <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
                   <path d="M8 5v14l11-7z" fill="currentColor" />

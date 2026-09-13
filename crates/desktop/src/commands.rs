@@ -11,38 +11,58 @@
 //! presentation layer, which carries no protocol coupling.
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
-/// The cancel flag for the turn currently in flight.
+use crate::agent;
+
+/// Cancel flags for the turns currently in flight, keyed by conversation.
 ///
-/// A local model can spend minutes in a hidden scratchpad, so a turn that
-/// cannot be abandoned is a turn that holds the interface hostage. The flag is
-/// checked between stream events, which is the only place the work is
-/// interruptible without killing the daemon's own generation.
-fn cancel_flag() -> &'static Mutex<Option<Arc<AtomicBool>>> {
-    static FLAG: OnceLock<Mutex<Option<Arc<AtomicBool>>>> = OnceLock::new();
-    FLAG.get_or_init(|| Mutex::new(None))
+/// Keyed rather than single, because conversations run independently: a turn
+/// started in one chat must not be cancelled by a turn starting in another, and
+/// the stop button has to abandon the turn the user is actually looking at. A
+/// local model can spend minutes in a hidden scratchpad, so a turn that cannot
+/// be abandoned is a turn that holds the interface hostage.
+fn cancel_flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    static FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+    FLAGS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Begin a turn, replacing (and implicitly cancelling) any previous one.
-fn begin_turn() -> Arc<AtomicBool> {
+/// Begin a turn for one conversation, cancelling any earlier turn in that same
+/// conversation only.
+fn begin_turn(turn_id: &str) -> Arc<AtomicBool> {
     let token = Arc::new(AtomicBool::new(false));
-    if let Ok(mut slot) = cancel_flag().lock() {
-        if let Some(previous) = slot.replace(Arc::clone(&token)) {
+    if let Ok(mut flags) = cancel_flags().lock() {
+        if let Some(previous) = flags.insert(turn_id.to_string(), Arc::clone(&token)) {
             previous.store(true, Ordering::SeqCst);
         }
     }
     token
 }
 
-/// Ask the running turn to stop at the next stream event.
+/// Release a finished turn, so the table does not grow with dead entries.
+///
+/// Only removes the entry when it is still the one this turn registered: a
+/// newer turn for the same conversation must keep its own flag.
+fn end_turn(turn_id: &str, token: &Arc<AtomicBool>) {
+    if let Ok(mut flags) = cancel_flags().lock() {
+        if flags
+            .get(turn_id)
+            .is_some_and(|current| Arc::ptr_eq(current, token))
+        {
+            flags.remove(turn_id);
+        }
+    }
+}
+
+/// Ask one conversation's running turn to stop at the next interruption point.
 #[tauri::command]
-pub fn cancel_turn() {
-    if let Ok(slot) = cancel_flag().lock() {
-        if let Some(token) = slot.as_ref() {
+pub fn cancel_turn(turn_id: String) {
+    if let Ok(flags) = cancel_flags().lock() {
+        if let Some(token) = flags.get(&turn_id) {
             token.store(true, Ordering::SeqCst);
         }
     }
@@ -222,6 +242,44 @@ pub enum TurnEvent {
     Failed { message: String },
     /// The run was abandoned at the user's request.
     Cancelled,
+    /// A tool call started. Shown so tool use is visible rather than implied.
+    ToolStart { name: String, summary: String },
+    /// A tool call finished, with a one-line trace of what came back.
+    ToolEnd { name: String, ok: bool, detail: String },
+}
+
+/// Bridges loop events onto the webview channel.
+struct ChannelSink<'a> {
+    channel: &'a tauri::ipc::Channel<TurnEvent>,
+}
+
+impl agent::Sink for ChannelSink<'_> {
+    fn text(&self, text: &str) {
+        let _ = self.channel.send(TurnEvent::Text {
+            text: text.to_string(),
+        });
+    }
+
+    fn thinking(&self, text: &str) {
+        let _ = self.channel.send(TurnEvent::Thinking {
+            text: text.to_string(),
+        });
+    }
+
+    fn tool_start(&self, name: &str, summary: &str) {
+        let _ = self.channel.send(TurnEvent::ToolStart {
+            name: name.to_string(),
+            summary: summary.to_string(),
+        });
+    }
+
+    fn tool_end(&self, name: &str, ok: bool, detail: &str) {
+        let _ = self.channel.send(TurnEvent::ToolEnd {
+            name: name.to_string(),
+            ok,
+            detail: detail.to_string(),
+        });
+    }
 }
 
 /// Run a request against the local daemon, streaming output to the webview.
@@ -231,148 +289,109 @@ pub enum TurnEvent {
 /// indistinguishable from one that has crashed. When `enhance` is set the
 /// request is routed through the staged harness, and each stage is announced so
 /// the interface can show which one is running.
+///
+/// Every stage runs the full agent loop, so the model can call tools at any
+/// point. An earlier version sent no tools at all, which meant the model could
+/// only describe the research it would have done and then answer from memory.
 #[tauri::command]
 pub async fn send_prompt(
     app: tauri::AppHandle,
     channel: tauri::ipc::Channel<TurnEvent>,
+    turn_id: String,
     request: String,
     model: String,
     enhance: bool,
     reasoning: bool,
 ) -> Result<(), String> {
     let _ = &app;
-    let cancel = begin_turn();
+    let cancel = begin_turn(&turn_id);
+    let result = run_turn(&channel, &request, &model, enhance, reasoning, &cancel).await;
+    end_turn(&turn_id, &cancel);
 
+    match result {
+        Ok(()) => Ok(()),
+        Err(message) => {
+            let _ = channel.send(TurnEvent::Failed {
+                message: message.clone(),
+            });
+            Err(message)
+        }
+    }
+}
+
+async fn run_turn(
+    channel: &tauri::ipc::Channel<TurnEvent>,
+    request: &str,
+    model: &str,
+    enhance: bool,
+    reasoning: bool,
+    cancel: &Arc<AtomicBool>,
+) -> Result<(), String> {
     let stages: Vec<runtime::enhance::Stage> = if enhance {
-        runtime::enhance::triage(&request).stages
+        runtime::enhance::triage(request).stages
     } else {
         Vec::new()
     };
 
-    let prompt = runtime::enhance::EnhancedPrompt::new(&request);
-    let client = api::ProviderClient::from_model(&model).map_err(|error| error.to_string())?;
+    let client = api::ProviderClient::from_model(model).map_err(|error| error.to_string())?;
+    let system = agent::system_prompt(&chrono::Local::now().format("%Y-%m-%d").to_string());
+    let sink = ChannelSink { channel };
 
     if stages.is_empty() {
-        stream_once(
-            &client, &model, &request, &channel, None, 0, 1, reasoning, &cancel,
+        let outcome = agent::run(
+            &client,
+            model,
+            system,
+            request.to_string(),
+            reasoning,
+            cancel,
+            &sink,
         )
         .await?;
+        let _ = channel.send(if outcome.cancelled {
+            TurnEvent::Cancelled
+        } else {
+            TurnEvent::Done
+        });
         return Ok(());
     }
 
+    let prompt = runtime::enhance::EnhancedPrompt::new(request);
     let total = stages.len();
     let mut carry: Vec<(runtime::enhance::Stage, String)> = Vec::new();
+
     for (index, stage) in stages.iter().enumerate() {
         if cancel.load(Ordering::SeqCst) {
-            break;
+            let _ = channel.send(TurnEvent::Cancelled);
+            return Ok(());
         }
-        let rendered = prompt.render_stage(*stage, &carry);
-        let produced = stream_once(
-            &client,
-            &model,
-            &rendered,
-            &channel,
-            Some(stage.label()),
+
+        let _ = channel.send(TurnEvent::StageStart {
+            stage: stage.label().to_string(),
             index,
             total,
+        });
+
+        let outcome = agent::run(
+            &client,
+            model,
+            system.clone(),
+            prompt.render_stage(*stage, &carry),
             reasoning,
-            &cancel,
+            cancel,
+            &sink,
         )
         .await?;
-        carry.push((*stage, produced));
+
+        if outcome.cancelled {
+            let _ = channel.send(TurnEvent::Cancelled);
+            return Ok(());
+        }
+        carry.push((*stage, outcome.text));
     }
 
     let _ = channel.send(TurnEvent::Done);
     Ok(())
-}
-
-/// Stream one turn, returning the visible text it produced.
-///
-/// The text is returned as well as streamed because the harness needs to carry
-/// each stage's output into the next one.
-async fn stream_once(
-    client: &api::ProviderClient,
-    model: &str,
-    prompt: &str,
-    channel: &tauri::ipc::Channel<TurnEvent>,
-    stage: Option<&str>,
-    index: usize,
-    total: usize,
-    reasoning: bool,
-    cancel: &Arc<AtomicBool>,
-) -> Result<String, String> {
-    if let Some(label) = stage {
-        let _ = channel.send(TurnEvent::StageStart {
-            stage: label.to_string(),
-            index,
-            total,
-        });
-    }
-
-    // Measured on a local 9.7B model: the same one-word answer took 40.5s with
-    // reasoning left on and 1.0s with `reasoning_effort: none`, because the
-    // scratchpad is billed at the same tokens-per-second as the answer. The
-    // scratchpad is never displayed, so paying for it must be a deliberate act.
-    let request = api::MessageRequest {
-        model: model.to_string(),
-        max_tokens: 4096,
-        messages: vec![api::InputMessage::user_text(prompt)],
-        stream: true,
-        reasoning_effort: if reasoning {
-            None
-        } else {
-            Some("none".to_string())
-        },
-        ..Default::default()
-    };
-
-    let mut stream = match client.stream_message(&request).await {
-        Ok(stream) => stream,
-        Err(error) => {
-            let message = error.to_string();
-            let _ = channel.send(TurnEvent::Failed {
-                message: message.clone(),
-            });
-            return Err(message);
-        }
-    };
-
-    let mut collected = String::new();
-    loop {
-        if cancel.load(Ordering::SeqCst) {
-            let _ = channel.send(TurnEvent::Cancelled);
-            return Ok(collected);
-        }
-        match stream.next_event().await {
-            Ok(Some(event)) => {
-                if let api::StreamEvent::ContentBlockDelta(delta) = event {
-                    match delta.delta {
-                        api::ContentBlockDelta::TextDelta { text } => {
-                            collected.push_str(&text);
-                            let _ = channel.send(TurnEvent::Text { text });
-                        }
-                        api::ContentBlockDelta::ThinkingDelta { thinking } => {
-                            let _ = channel.send(TurnEvent::Thinking { text: thinking });
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Ok(None) => break,
-            Err(error) => {
-                let message = error.to_string();
-                let _ = channel.send(TurnEvent::Failed {
-                    message: message.clone(),
-                });
-                return Err(message);
-            }
-        }
-    }
-
-    if stage.is_none() {
-        let _ = channel.send(TurnEvent::Done);
-    }
-    Ok(collected)
 }
 
 #[cfg(test)]
@@ -451,7 +470,7 @@ mod tests {
     ///
     /// Ignored by default so the suite stays hermetic, but kept in the tree
     /// because model detection is the one behaviour that cannot be proven
-    /// without a real daemon — mocking it would only assert that the mock works.
+    /// without a real daemon â€” mocking it would only assert that the mock works.
     /// Run with `cargo test -p desktop -- --ignored`.
     #[tokio::test]
     #[ignore = "requires a running Ollama daemon"]

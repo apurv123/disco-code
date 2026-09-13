@@ -8,6 +8,7 @@
 // Windows. Debug builds keep it: that is where panics become visible.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod agent;
 mod commands;
 
 fn main() {

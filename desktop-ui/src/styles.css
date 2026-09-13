@@ -516,3 +516,23 @@ button:disabled {
   font-size: 11px;
   color: var(--text);
 }
+/* A tool call, shown inline so tool use is visible rather than implied. It is
+   deliberately quieter than a message: it is evidence, not an answer. */
+.toolrow {
+  align-self: flex-start;
+  max-width: 780px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-weak);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--info);
+  border-radius: 7px;
+  padding: 5px 10px;
+  overflow-wrap: anywhere;
+}
+
+.toolrow.bad {
+  border-left-color: var(--error);
+  color: var(--error);
+}

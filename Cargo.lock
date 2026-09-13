@@ -1142,6 +1142,7 @@ name = "desktop"
 version = "0.1.0"
 dependencies = [
  "api",
+ "chrono",
  "reqwest 0.12.28",
  "runtime",
  "serde",
@@ -1149,6 +1150,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tokio",
+ "tools",
 ]
 
 [[package]]

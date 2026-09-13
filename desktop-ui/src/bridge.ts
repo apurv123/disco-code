@@ -51,6 +51,8 @@ export type TurnEvent =
   | { kind: "done" }
   | { kind: "failed"; message: string }
   | { kind: "cancelled" }
+  | { kind: "tool_start"; name: string; summary: string }
+  | { kind: "tool_end"; name: string; ok: boolean; detail: string }
 
 export function daemonStatus(): Promise<DaemonStatus> {
   return invoke<DaemonStatus>("daemon_status")
@@ -60,12 +62,13 @@ export function triageRequest(request: string): Promise<Triage> {
   return invoke<Triage>("triage_request", { request })
 }
 
-/** Abandon the turn in flight. Safe to call when nothing is running. */
-export function cancelTurn(): Promise<void> {
-  return invoke<void>("cancel_turn")
+/** Abandon the turn running in one chat. Safe to call when nothing is running. */
+export function cancelTurn(turnId: string): Promise<void> {
+  return invoke<void>("cancel_turn", { turnId })
 }
 
 export function sendPrompt(
+  turnId: string,
   request: string,
   model: string,
   enhance: boolean,
@@ -74,5 +77,12 @@ export function sendPrompt(
 ): Promise<void> {
   const channel = new Channel<TurnEvent>()
   channel.onmessage = onEvent
-  return invoke<void>("send_prompt", { channel, request, model, enhance, reasoning })
+  return invoke<void>("send_prompt", {
+    channel,
+    turnId,
+    request,
+    model,
+    enhance,
+    reasoning,
+  })
 }
