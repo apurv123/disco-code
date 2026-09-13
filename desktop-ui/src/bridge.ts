@@ -24,6 +24,14 @@ export type DaemonStatus = {
   host: string
   reachable: boolean
   models: Model[]
+  /**
+   * Embedding-only models, reported apart from `models`.
+   *
+   * They are never offered as a conversation partner, because no setting makes
+   * one able to answer a prompt, but they are named so a pulled model is never
+   * silently missing.
+   */
+  embedding_models: string[]
   detail: string | null
 }
 

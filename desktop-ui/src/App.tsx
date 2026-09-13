@@ -8,14 +8,15 @@ import {
   type Triage,
   type TurnEvent,
 } from "./bridge"
+import {
+  emptyChat,
+  load as loadChats,
+  save as saveChats,
+  titleFrom,
+  type Chat,
+  type Entry,
+} from "./chats"
 import { applyTheme, DEFAULT_THEME_ID, THEMES } from "./theme"
-
-type Entry = {
-  role: "user" | "assistant" | "error"
-  text: string
-  /** Set when the harness produced this text during a named stage. */
-  stage?: string
-}
 
 /** Debounce so triage runs on a settled request, not on every keystroke. */
 function useDebounced<T>(source: () => T, delay: number): () => T {
@@ -36,8 +37,18 @@ export default function App() {
   // 1.0s with it off, and the scratchpad is never shown.
   const [reasoning, setReasoning] = createSignal(false)
   const [draft, setDraft] = createSignal("")
-  const [entries, setEntries] = createSignal<Entry[]>([])
-  const [running, setRunning] = createSignal(false)
+
+  const restored = loadChats()
+  const [chats, setChats] = createSignal<Chat[]>(
+    restored.length > 0 ? restored : [emptyChat()],
+  )
+  const [activeId, setActiveId] = createSignal(chats()[0]!.id)
+
+  // The chat whose turn is in flight, or null. One turn runs at a time: the
+  // core cancels any predecessor when a new one starts, so pretending
+  // otherwise here would quietly lose a reply.
+  const [busyChat, setBusyChat] = createSignal<string | null>(null)
+
   const [activeStage, setActiveStage] = createSignal<string | null>(null)
   const [doneStages, setDoneStages] = createSignal<string[]>([])
   const [themeId, setThemeId] = createSignal(DEFAULT_THEME_ID)
@@ -50,6 +61,11 @@ export default function App() {
 
   let transcriptRef: HTMLDivElement | undefined
 
+  const active = (): Chat => chats().find((c) => c.id === activeId()) ?? chats()[0]!
+  const entries = (): Entry[] => active().entries
+  const running = (): boolean => busyChat() !== null
+  const runningHere = (): boolean => busyChat() === activeId()
+
   onMount(() => {
     const theme = THEMES.find((t) => t.id === DEFAULT_THEME_ID)
     if (theme) applyTheme(theme, true)
@@ -59,6 +75,8 @@ export default function App() {
     const theme = THEMES.find((t) => t.id === themeId())
     if (theme) applyTheme(theme, true)
   })
+
+  createEffect(() => saveChats(chats()))
 
   // Default to the first model that can actually drive the agent loop.
   createEffect(() => {
@@ -84,27 +102,72 @@ export default function App() {
     })
   }
 
-  const appendToLast = (text: string, stage: string | null) => {
-    setEntries((prev) => {
-      const next = [...prev]
+  /** Rewrites one chat in place, leaving the others untouched. */
+  const patch = (id: string, edit: (chat: Chat) => Chat) => {
+    setChats((prev) => prev.map((chat) => (chat.id === id ? edit(chat) : chat)))
+  }
+
+  const push = (id: string, entry: Entry) => {
+    patch(id, (chat) => ({
+      ...chat,
+      entries: [...chat.entries, entry],
+      updatedAt: Date.now(),
+    }))
+    if (id === activeId()) scrollDown()
+  }
+
+  const appendToLast = (id: string, text: string, stage: string | null) => {
+    patch(id, (chat) => {
+      const next = [...chat.entries]
       const last = next[next.length - 1]
       if (last && last.role === "assistant" && last.stage === (stage ?? undefined)) {
         next[next.length - 1] = { ...last, text: last.text + text }
       } else {
         next.push({ role: "assistant", text, stage: stage ?? undefined })
       }
-      return next
+      return { ...chat, entries: next, updatedAt: Date.now() }
     })
+    if (id === activeId()) scrollDown()
+  }
+
+  const startChat = () => {
+    const chat = emptyChat()
+    setChats((prev) => [chat, ...prev])
+    setActiveId(chat.id)
+    setDraft("")
     scrollDown()
+  }
+
+  const openChat = (id: string) => {
+    setActiveId(id)
+    scrollDown()
+  }
+
+  const removeChat = (id: string) => {
+    // A running turn writes into its originating chat, so that chat must not
+    // be removed out from under it.
+    if (busyChat() === id) return
+    setChats((prev) => {
+      const next = prev.filter((c) => c.id !== id)
+      return next.length > 0 ? next : [emptyChat()]
+    })
+    if (activeId() === id) setActiveId(chats()[0]!.id)
   }
 
   const submit = async () => {
     const request = draft().trim()
     if (!request || running() || !model()) return
 
-    setEntries((prev) => [...prev, { role: "user", text: request }])
+    const id = activeId()
+    patch(id, (chat) => ({
+      ...chat,
+      title: chat.entries.length === 0 ? titleFrom(request) : chat.title,
+      entries: [...chat.entries, { role: "user", text: request }],
+      updatedAt: Date.now(),
+    }))
+
     setDraft("")
-    setRunning(true)
+    setBusyChat(id)
     setActiveStage(null)
     setDoneStages([])
     setThinkingChars(0)
@@ -125,7 +188,7 @@ export default function App() {
           break
         }
         case "text":
-          appendToLast(event.text, activeStage())
+          appendToLast(id, event.text, activeStage())
           break
         case "thinking":
           // Reasoning is deliberately not rendered as answer text: presenting a
@@ -134,14 +197,12 @@ export default function App() {
           setThinkingChars((prev) => prev + event.text.length)
           break
         case "failed":
-          setEntries((prev) => [...prev, { role: "error", text: event.message }])
-          scrollDown()
+          push(id, { role: "error", text: event.message })
           break
         case "done":
           break
         case "cancelled":
-          setEntries((prev) => [...prev, { role: "error", text: "Stopped." }])
-          scrollDown()
+          push(id, { role: "error", text: "Stopped." })
           break
       }
     }
@@ -150,10 +211,10 @@ export default function App() {
       await sendPrompt(request, model(), enhance(), reasoning(), onEvent)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      setEntries((prev) => [...prev, { role: "error", text: message }])
+      push(id, { role: "error", text: message })
     } finally {
       clearInterval(ticker)
-      setRunning(false)
+      setBusyChat(null)
       setActiveStage(null)
       scrollDown()
     }
@@ -172,6 +233,45 @@ export default function App() {
         <div class="brand">
           <span class="brand-dot" />
           <span>Disco Code</span>
+        </div>
+
+        <div class="chats">
+          <div class="chats-head">
+            <div class="section-label" style={{ margin: 0 }}>
+              Chats
+            </div>
+            <button class="linkbtn" onClick={startChat}>
+              New
+            </button>
+          </div>
+          <div class="chats-list">
+            <For each={chats()}>
+              {(chat) => (
+                <div
+                  class={`chat-row ${chat.id === activeId() ? "active" : ""}`}
+                  onClick={() => openChat(chat.id)}
+                  title={chat.title}
+                >
+                  <Show when={busyChat() === chat.id}>
+                    <span class="spinner" style={{ margin: 0 }} />
+                  </Show>
+                  <span class="chat-title">{chat.title}</span>
+                  <button
+                    class="chat-del"
+                    title="Delete chat"
+                    aria-label={`Delete ${chat.title}`}
+                    disabled={busyChat() === chat.id}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      removeChat(chat.id)
+                    }}
+                  >
+                    &times;
+                  </button>
+                </div>
+              )}
+            </For>
+          </div>
         </div>
 
         <div>
@@ -215,10 +315,18 @@ export default function App() {
               </div>
             )}
           </Show>
+          {/* Embedding models are named but never offered: they index text and
+              cannot answer, so listing one as a disabled chat model would
+              imply it might become selectable. */}
+          <Show when={(status()?.embedding_models.length ?? 0) > 0}>
+            <div class="aside-note">
+              Indexing only: <code>{status()!.embedding_models.join(", ")}</code>
+            </div>
+          </Show>
         </div>
 
         <div>
-          <div class="section-label">Enhancement</div>
+          <div class="section-label">Behaviour</div>
           <label class="toggle">
             <input
               type="checkbox"
@@ -226,23 +334,19 @@ export default function App() {
               onChange={(event) => setEnhance(event.currentTarget.checked)}
             />
             <span class="toggle-copy">
-              Route requests through the staged harness. Simple edits still run
-              as a single turn.
+              <b>Multi-pass</b> - plans, works, then checks itself. Off: one
+              direct answer.
             </span>
           </label>
-        </div>
-
-        <div>
-          <div class="section-label">Reasoning</div>
-          <label class="toggle">
+          <label class="toggle" style={{ "margin-top": "11px" }}>
             <input
               type="checkbox"
               checked={reasoning()}
               onChange={(event) => setReasoning(event.currentTarget.checked)}
             />
             <span class="toggle-copy">
-              Let the model think before answering. Much slower - its scratchpad
-              costs the same time as the answer, and is never displayed.
+              <b>Think first</b> - far slower, often 10x. The thinking is never
+              shown.
             </span>
           </label>
         </div>
@@ -290,17 +394,7 @@ export default function App() {
             </For>
           </select>
           <div class="status" style={{ "margin-top": "10px" }}>
-            <button
-              style={{
-                background: "transparent",
-                color: "var(--text-weak)",
-                border: "1px solid var(--border)",
-                padding: "6px 11px",
-                "font-weight": "400",
-                "font-size": "12px",
-              }}
-              onClick={() => void refetch()}
-            >
+            <button class="linkbtn" onClick={() => void refetch()}>
               Rescan models
             </button>
           </div>
@@ -341,7 +435,7 @@ export default function App() {
             </For>
           </Show>
 
-          <Show when={running()}>
+          <Show when={runningHere()}>
             <div class="status">
               <span class="spinner" />
               <span>
@@ -360,9 +454,11 @@ export default function App() {
         <div class="composer">
           <textarea
             placeholder={
-              status()?.reachable
-                ? "Ask for a change. Shift+Enter for a new line."
-                : "Start Ollama to begin."
+              !status()?.reachable
+                ? "Start Ollama to begin."
+                : running() && !runningHere()
+                  ? "Another chat is generating. Stop it, or wait."
+                  : "Ask for a change. Shift+Enter for a new line."
             }
             value={draft()}
             disabled={!status()?.reachable}
@@ -374,9 +470,7 @@ export default function App() {
             title={running() ? "Stop generating" : "Send"}
             aria-label={running() ? "Stop generating" : "Send"}
             onClick={() => (running() ? void cancelTurn() : void submit())}
-            disabled={
-              !status()?.reachable || (!running() && !draft().trim())
-            }
+            disabled={!status()?.reachable || (!running() && !draft().trim())}
           >
             <Show
               when={running()}

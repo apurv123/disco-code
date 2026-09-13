@@ -87,6 +87,14 @@ pub struct DaemonStatus {
     pub host: String,
     pub reachable: bool,
     pub models: Vec<ModelDto>,
+    /// Embedding-only models, reported apart from the chat models.
+    ///
+    /// These are deliberately kept out of `models`: an embedding model in a
+    /// chat picker is a category error, not a disabled choice, because no
+    /// setting the user can change will let it answer a prompt. They are still
+    /// named so that a pulled model never silently disappears, and because the
+    /// workspace index needs one to exist.
+    pub embedding_models: Vec<String>,
     /// Present only when the daemon could not be reached.
     pub detail: Option<String>,
 }
@@ -123,6 +131,7 @@ pub async fn daemon_status() -> DaemonStatus {
             host,
             reachable: false,
             models: Vec::new(),
+            embedding_models: Vec::new(),
             detail: Some(
                 "No models found. Check that Ollama is running and that you have pulled at \
                  least one model with `ollama pull`."
@@ -131,10 +140,33 @@ pub async fn daemon_status() -> DaemonStatus {
         };
     }
 
+    let (chat, embedding): (Vec<_>, Vec<_>) =
+        models.into_iter().partition(|m| m.caps.is_chat());
+    let embedding_models: Vec<String> = embedding.into_iter().map(|m| m.id).collect();
+
+    // Having only embedding models is indistinguishable from having none, as
+    // far as holding a conversation goes, so it is reported as such instead of
+    // presenting a picker that cannot produce an answer.
+    if chat.is_empty() {
+        return DaemonStatus {
+            host,
+            reachable: false,
+            models: Vec::new(),
+            embedding_models,
+            detail: Some(
+                "Only embedding models are installed. Embedding models index text and cannot \
+                 hold a conversation; pull a chat model, for example `ollama pull \
+                 qwen2.5-coder:7b`."
+                    .to_string(),
+            ),
+        };
+    }
+
     DaemonStatus {
         host,
         reachable: true,
-        models: models.into_iter().map(ModelDto::from).collect(),
+        models: chat.into_iter().map(ModelDto::from).collect(),
+        embedding_models,
         detail: None,
     }
 }
@@ -358,6 +390,8 @@ mod tests {
                 tools: false,
                 vision: false,
                 thinking: false,
+                completion: true,
+                embedding: false,
             },
         };
 
@@ -383,6 +417,8 @@ mod tests {
                 tools: true,
                 vision: false,
                 thinking: true,
+                completion: true,
+                embedding: false,
             },
         };
 
@@ -438,5 +474,12 @@ mod tests {
                 model.id
             );
         }
+        assert!(
+            !status
+                .models
+                .iter()
+                .any(|model| status.embedding_models.contains(&model.id)),
+            "an embedding model reached the chat picker, where it can never answer"
+        );
     }
 }

@@ -68,4 +68,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../../.git/refs");
     println!("cargo:rerun-if-changed=../../../.git/index");
+    // Build-script nonce. Windows Smart App Control blocks freshly produced,
+    // unsigned build-script binaries by hash (os error 4551); changing this
+    // comment changes the hash and clears the block. Harmless elsewhere.
+    // nonce: 2
 }
