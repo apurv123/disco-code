@@ -6,9 +6,7 @@ import {
   daemonStatus,
   removeAttachment as removeStoredAttachment,
   sendPrompt,
-  triageRequest,
   type Model,
-  type Triage,
   type TurnEvent,
 } from "./bridge"
 import {
@@ -38,17 +36,6 @@ const IDLE: Run = {
   elapsed: 0,
   tool: null,
   stopping: false,
-}
-
-/** Debounce so triage runs on a settled request, not on every keystroke. */
-function useDebounced<T>(source: () => T, delay: number): () => T {
-  const [value, setValue] = createSignal(source())
-  createEffect(() => {
-    const next = source()
-    const timer = setTimeout(() => setValue(() => next), delay)
-    return () => clearTimeout(timer)
-  })
-  return value
 }
 
 export default function App() {
@@ -103,8 +90,6 @@ export default function App() {
   const [themeId, setThemeId] = createSignal(
     localStorage.getItem(THEME_KEY) ?? DEFAULT_THEME_ID,
   )
-  const [triage, setTriage] = createSignal<Triage | null>(null)
-
   let transcriptRef: HTMLDivElement | undefined
 
   const active = (): Chat => chats().find((c) => c.id === activeId()) ?? chats()[0]!
@@ -168,18 +153,6 @@ export default function App() {
         candidate.startsWith("nomic-embed-text:"),
     )
     setEmbeddingModel(preferred ?? models[0] ?? "")
-  })
-
-  // Triage is deterministic and free, so the routing decision is shown while
-  // the request is still being typed rather than after minutes of generation.
-  const settled = useDebounced(draft, 220)
-  createEffect(() => {
-    const request = settled().trim()
-    if (!request || !active().enhance) {
-      setTriage(null)
-      return
-    }
-    void triageRequest(request).then(setTriage).catch(() => setTriage(null))
   })
 
   const scrollDown = () => {
@@ -581,45 +554,6 @@ export default function App() {
               </Show>
             </div>
 
-            <Show when={active().enhance && triage()}>
-              {(current) => (
-                <div class="triage">
-                  <div class="triage-head">
-                    <span class="section-label" style={{ margin: 0 }}>
-                      Multi-pass route
-                    </span>
-                    <span
-                      class={`badge ${current().complexity}`}
-                      title="Automatically detected request complexity"
-                    >
-                      {current().complexity}
-                    </span>
-                  </div>
-                  <div class="route-copy">
-                    Selected automatically. These stages run in order and highlight
-                    as work progresses. Turn off Multi-pass below for one direct answer.
-                  </div>
-                  <div class="stage-chips">
-                    <For each={current().stages}>
-                      {(stage) => (
-                        <span
-                          title={stage.directive}
-                          class={`chip ${
-                            run().stage === stage.stage
-                              ? "active"
-                              : run().doneStages.includes(stage.stage)
-                                ? "done"
-                                : ""
-                          }`}
-                        >
-                          {stage.stage}
-                        </span>
-                      )}
-                    </For>
-                  </div>
-                </div>
-              )}
-            </Show>
           </Show>
         </div>
 
