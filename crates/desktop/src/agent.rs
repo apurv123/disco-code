@@ -16,16 +16,12 @@ use api::{
 };
 use serde_json::Value;
 
+use crate::workspace::Workspace;
+
 /// Tools the desktop app exposes to the model.
 ///
-/// Deliberately read-only, plus network research. The desktop has no approval
-/// prompt yet, and a local model that has misread the request should not be one
-/// malformed tool call away from running a shell command or rewriting a file.
-/// Everything here either reads or fetches, so the worst outcome of a confused
-/// call is a wasted turn.
-///
-/// `bash`, `PowerShell`, `write_file` and `edit_file` are withheld for exactly
-/// that reason, and should be added when there is a UI to approve them.
+/// Read-only, plus network research. These are safe to offer unconditionally:
+/// the worst outcome of a confused call is a wasted turn.
 const ALLOWED_TOOLS: &[&str] = &[
     "WebSearch",
     "WebFetch",
@@ -38,6 +34,18 @@ const ALLOWED_TOOLS: &[&str] = &[
     "GitShow",
     "GitBlame",
 ];
+
+/// Tools that change files, offered only once a project folder is chosen.
+///
+/// There is no per-call approval prompt, so the project folder is the entire
+/// boundary: every path these receive is confined to it by
+/// [`workspace::Workspace`] before the tool runs. With no folder chosen there
+/// is nothing to confine them to, so they are not offered at all.
+///
+/// `bash` and `PowerShell` stay withheld regardless. A shell command cannot be
+/// confined by rewriting an argument — `cd` alone defeats it — so honouring the
+/// folder boundary for them needs a real sandbox, not a path check.
+const WRITE_TOOLS: &[&str] = &["write_file", "edit_file"];
 
 /// Upper bound on tool round trips in a single turn.
 ///
@@ -74,11 +82,17 @@ pub trait Sink: Sync {
 }
 
 /// The tool definitions the model is offered.
+///
+/// Writing tools appear only when there is a project folder to confine them to.
 #[must_use]
-pub fn definitions() -> Vec<ToolDefinition> {
-    let allowed: BTreeSet<String> = ALLOWED_TOOLS
-        .iter()
-        .map(|name| tools::canonical_allowed_tool_name(name))
+pub fn definitions(workspace: Option<&Workspace>) -> Vec<ToolDefinition> {
+    let mut names: Vec<&str> = ALLOWED_TOOLS.to_vec();
+    if workspace.is_some() {
+        names.extend_from_slice(WRITE_TOOLS);
+    }
+    let allowed: BTreeSet<String> = names
+        .into_iter()
+        .map(tools::canonical_allowed_tool_name)
         .collect();
     tools::GlobalToolRegistry::builtin().definitions(Some(&allowed))
 }
@@ -90,7 +104,20 @@ pub fn definitions() -> Vec<ToolDefinition> {
 /// they need today's date, because otherwise "latest" is silently resolved
 /// against a training cut-off that is months or years stale.
 #[must_use]
-pub fn system_prompt(today: &str) -> String {
+pub fn system_prompt(today: &str, workspace: Option<&Workspace>) -> String {
+    let files = match workspace {
+        Some(workspace) => format!(
+            "- The project folder is {}. You can create and change files in it with write_file \
+             and edit_file, using paths relative to that folder. You cannot touch anything \
+             outside it.\n\
+             - Read a file before editing it, so you do not overwrite work you have not seen.\n",
+            workspace.label()
+        ),
+        None => "- No project folder is open, so you cannot create or change any files. If a \
+                 request needs that, say so and tell the user to open a folder.\n"
+            .to_string(),
+    };
+
     format!(
         "You are Disco Code, a coding assistant running entirely on the user's machine.\n\
          Today's date is {today}.\n\
@@ -108,8 +135,9 @@ pub fn system_prompt(today: &str) -> String {
          call grep_search. Do not guess what a file contains.\n\
          - Use WebFetch to read a specific page you already have a URL for.\n\
          - When you have used web results, end with a Sources section listing the URLs.\n\
-         - You cannot run shell commands or modify files in this app. If a request needs that, \
-         say so plainly and give the exact commands the user should run.\n\
+         {files}\
+         - You cannot run shell commands. If a request needs one, say so plainly and give the \
+         exact command the user should run.\n\
          - When the tools have given you enough, answer directly and concisely. Do not narrate \
          your process."
     )
@@ -122,10 +150,11 @@ pub async fn run(
     system: String,
     first: String,
     reasoning: bool,
+    workspace: Option<&Workspace>,
     cancel: &Arc<AtomicBool>,
     sink: &dyn Sink,
 ) -> Result<Outcome, String> {
-    let tool_defs = definitions();
+    let tool_defs = definitions(workspace);
     let mut messages = vec![InputMessage::user_text(first)];
     let mut transcript = String::new();
 
@@ -204,7 +233,7 @@ pub async fn run(
             }
 
             sink.tool_start(&call.name, &summarize(&call.name, &call.input));
-            let (output, is_error) = execute(&call).await;
+            let (output, is_error) = execute(&call, workspace).await;
             sink.tool_end(&call.name, !is_error, &first_line(&output));
 
             messages.push(InputMessage::user_tool_result(
@@ -425,9 +454,25 @@ async fn stream_step(
 ///
 /// The tool registry is synchronous and its HTTP client blocks, so calling it
 /// directly here would stall the runtime that is streaming the reply.
-async fn execute(call: &ToolCall) -> (String, bool) {
+///
+/// Paths are confined to the project folder first. A refusal is returned to the
+/// model as a tool error, so it can correct itself rather than the turn dying.
+async fn execute(call: &ToolCall, workspace: Option<&Workspace>) -> (String, bool) {
     let name = call.name.clone();
-    let input = call.input.clone();
+
+    let input = match workspace {
+        Some(workspace) => match workspace.rewrite(&call.input) {
+            Ok(confined) => confined,
+            Err(refusal) => return (refusal, true),
+        },
+        None => call.input.clone(),
+    };
+
+    // The file tools confine themselves to a workspace, which they default to
+    // the process working directory — for an installed app, wherever the
+    // launcher started it. Stating the folder here is what lets a write inside
+    // the project actually land instead of being refused as outside it.
+    tools::set_workspace_root(workspace.map(|workspace| workspace.root().to_path_buf()));
 
     let joined = tokio::task::spawn_blocking(move || {
         tools::GlobalToolRegistry::builtin().execute(&name, &input)
@@ -478,9 +523,15 @@ fn truncate(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn project(name: &str) -> Workspace {
+        let dir = std::env::temp_dir().join(format!("disco-agent-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        Workspace::open(dir.to_str().unwrap()).unwrap()
+    }
+
     #[test]
     fn web_search_is_offered_to_the_model() {
-        let names: Vec<String> = definitions().into_iter().map(|d| d.name).collect();
+        let names: Vec<String> = definitions(None).into_iter().map(|d| d.name).collect();
         assert!(
             names.iter().any(|n| n == "WebSearch"),
             "without WebSearch the model answers current-events questions from memory: {names:?}"
@@ -489,26 +540,67 @@ mod tests {
         assert!(!names.is_empty());
     }
 
+    /// A shell command cannot be confined by rewriting a path argument, so no
+    /// project folder makes it safe to offer.
     #[test]
-    fn mutating_tools_are_withheld_until_there_is_an_approval_ui() {
-        let names: Vec<String> = definitions().into_iter().map(|d| d.name).collect();
-        for withheld in ["bash", "PowerShell", "write_file", "edit_file"] {
+    fn shell_tools_are_withheld_even_with_a_project_open() {
+        let workspace = project("shell");
+        let names: Vec<String> = definitions(Some(&workspace))
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+
+        for withheld in ["bash", "PowerShell"] {
             assert!(
                 !names.iter().any(|n| n == withheld),
-                "{withheld} can change the machine and the desktop cannot yet ask permission"
+                "{withheld} can leave the project folder and cannot be confined by path"
             );
         }
     }
 
     #[test]
+    fn writing_is_offered_only_once_there_is_a_folder_to_confine_it_to() {
+        let without: Vec<String> = definitions(None).into_iter().map(|d| d.name).collect();
+        assert!(
+            !without.iter().any(|n| n == "write_file"),
+            "with no project folder there is no boundary, so writing must not be offered"
+        );
+
+        let workspace = project("writes");
+        let with: Vec<String> = definitions(Some(&workspace))
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(with.iter().any(|n| n == "write_file"));
+        assert!(with.iter().any(|n| n == "edit_file"));
+    }
+
+    #[test]
     fn the_system_prompt_dates_the_conversation_and_forbids_invention() {
-        let prompt = system_prompt("2026-09-13");
+        let prompt = system_prompt("2026-09-13", None);
         assert!(
             prompt.contains("2026-09-13"),
             "without today's date, 'latest' resolves against the training cut-off"
         );
         assert!(prompt.contains("WebSearch"));
         assert!(prompt.to_lowercase().contains("never invent"));
+    }
+
+    /// The model is told which folder it may write to, so it uses relative
+    /// paths inside the project rather than guessing an absolute location.
+    #[test]
+    fn the_system_prompt_names_the_project_folder_when_one_is_open() {
+        let workspace = project("named");
+
+        let open = system_prompt("2026-09-13", Some(&workspace));
+        assert!(open.contains(&workspace.label()));
+        assert!(open.contains("write_file"));
+
+        let closed = system_prompt("2026-09-13", None);
+        assert!(
+            closed.contains("No project folder is open"),
+            "the model must be told it cannot write, or it will claim it did"
+        );
     }
 
     #[test]
@@ -642,9 +734,10 @@ mod tests {
         let outcome = run(
             &client,
             &model,
-            system_prompt("2026-09-13"),
+            system_prompt("2026-09-13", None),
             "What are today's top news headlines?".to_string(),
             false,
+            None,
             &cancel,
             &recorder,
         )
@@ -663,5 +756,48 @@ mod tests {
             !outcome.text.trim().is_empty(),
             "the loop produced no answer at all"
         );
+    }
+
+    /// The user's screenshot showed the model claiming it had created
+    /// `hello_world.py` when no file existed. This asserts the file is really
+    /// on disk afterwards, which narration cannot fake.
+    #[tokio::test]
+    #[ignore = "requires a running Ollama daemon"]
+    async fn asking_for_a_file_actually_writes_it() {
+        let model =
+            std::env::var("DISCO_TEST_MODEL").unwrap_or_else(|_| "granite4.1:8b".to_string());
+        let dir = std::env::temp_dir().join("disco-agent-live-write");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let workspace = Workspace::open(dir.to_str().unwrap()).unwrap();
+
+        let client = api::ProviderClient::from_model(&model).expect("client");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let recorder = Recorder::default();
+
+        let outcome = run(
+            &client,
+            &model,
+            system_prompt("2026-09-13", Some(&workspace)),
+            "Create hello_world.py containing a program that prints Hello, World!".to_string(),
+            false,
+            Some(&workspace),
+            &cancel,
+            &recorder,
+        )
+        .await
+        .expect("the loop ran");
+
+        let written = dir.join("hello_world.py");
+        assert!(
+            written.is_file(),
+            "model said it wrote the file but nothing is on disk; tools: {:?}, failures: {:?}, \
+             text: {}",
+            recorder.tools.lock().unwrap(),
+            recorder.failures.lock().unwrap(),
+            outcome.text.chars().take(400).collect::<String>()
+        );
+        let body = std::fs::read_to_string(&written).unwrap();
+        assert!(body.contains("Hello"), "wrote the wrong contents: {body}");
     }
 }

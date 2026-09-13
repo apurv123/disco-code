@@ -67,12 +67,23 @@ export function cancelTurn(turnId: string): Promise<void> {
   return invoke<void>("cancel_turn", { turnId })
 }
 
+/**
+ * Ask for the folder the model may edit. Resolves to null if dismissed.
+ *
+ * Choosing a folder is what enables writing at all, so it is a deliberate,
+ * native act rather than a path typed into the page.
+ */
+export function chooseProjectFolder(): Promise<string | null> {
+  return invoke<string | null>("choose_project_folder")
+}
+
 export function sendPrompt(
   turnId: string,
   request: string,
   model: string,
   enhance: boolean,
   reasoning: boolean,
+  projectRoot: string | null,
   onEvent: (event: TurnEvent) => void,
 ): Promise<void> {
   const channel = new Channel<TurnEvent>()
@@ -84,5 +95,6 @@ export function sendPrompt(
     model,
     enhance,
     reasoning,
+    projectRoot,
   })
 }

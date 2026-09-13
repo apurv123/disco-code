@@ -1,6 +1,7 @@
 import { createEffect, createResource, createSignal, For, Show, onMount } from "solid-js"
 import {
   cancelTurn,
+  chooseProjectFolder,
   daemonStatus,
   sendPrompt,
   triageRequest,
@@ -54,6 +55,31 @@ export default function App() {
   // 1.0s with it off, and the scratchpad is never shown.
   const [reasoning, setReasoning] = createSignal(false)
   const [draft, setDraft] = createSignal("")
+
+  // Remembered between launches so the folder is chosen once, not every session.
+  const FOLDER_KEY = "disco-code.project-root"
+  const [projectRoot, setProjectRoot] = createSignal<string | null>(
+    localStorage.getItem(FOLDER_KEY),
+  )
+  const [folderError, setFolderError] = createSignal("")
+
+  createEffect(() => {
+    const root = projectRoot()
+    if (root) localStorage.setItem(FOLDER_KEY, root)
+    else localStorage.removeItem(FOLDER_KEY)
+  })
+
+  async function openFolder() {
+    setFolderError("")
+    try {
+      const picked = await chooseProjectFolder()
+      // Null means the dialog was dismissed, which must not clear a folder the
+      // user already had open.
+      if (picked) setProjectRoot(picked)
+    } catch (error) {
+      setFolderError(error instanceof Error ? error.message : String(error))
+    }
+  }
 
   const restored = loadChats()
   const [chats, setChats] = createSignal<Chat[]>(
@@ -246,7 +272,15 @@ export default function App() {
     }
 
     try {
-      await sendPrompt(id, request, model(), enhance(), reasoning(), onEvent)
+      await sendPrompt(
+        id,
+        request,
+        model(),
+        enhance(),
+        reasoning(),
+        projectRoot(),
+        onEvent,
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       push(id, { role: "error", text: message })
@@ -363,6 +397,42 @@ export default function App() {
             <div class="aside-note">
               Indexing only: <code>{status()!.embedding_models.join(", ")}</code>
             </div>
+          </Show>
+        </div>
+
+        <div>
+          <div class="section-label">Project folder</div>
+          {/* Choosing a folder is what enables writing at all: the model can
+              create and change files inside it and nowhere else. With no folder
+              chosen there is nothing to confine writes to, so it cannot write. */}
+          <Show
+            when={projectRoot()}
+            fallback={
+              <div class="aside-note">
+                No folder open, so the model can read and search but cannot
+                create or change any file.
+              </div>
+            }
+          >
+            <div class="folder-path" title={projectRoot()!}>
+              {projectRoot()}
+            </div>
+            <div class="aside-note">
+              The model may edit files here, and nowhere else.
+            </div>
+          </Show>
+          <div class="folder-actions">
+            <button class="linkbtn" onClick={openFolder}>
+              {projectRoot() ? "Change folder" : "Open folder"}
+            </button>
+            <Show when={projectRoot()}>
+              <button class="linkbtn" onClick={() => setProjectRoot(null)}>
+                Close
+              </button>
+            </Show>
+          </div>
+          <Show when={folderError()}>
+            <div class="aside-note bad">{folderError()}</div>
           </Show>
         </div>
 

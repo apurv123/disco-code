@@ -101,6 +101,35 @@ impl ToolRegistry {
     }
 }
 
+/// The folder the file tools treat as the project, when one has been set.
+///
+/// The file tools confine themselves to a workspace and default that to the
+/// process working directory, which is the right answer for the CLI — it is
+/// started in the project. A desktop app is started by the launcher from
+/// wherever Windows chose, so the user's chosen folder has to be stated rather
+/// than inferred, or every write lands outside the project and is refused.
+static WORKSPACE_ROOT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Sets the folder the file tools confine themselves to.
+///
+/// Global because the boundary is a property of the running application rather
+/// than of one call, and a per-call override would let one caller widen it.
+pub fn set_workspace_root(root: Option<PathBuf>) {
+    if let Ok(mut slot) = WORKSPACE_ROOT.lock() {
+        *slot = root;
+    }
+}
+
+/// The workspace the file tools operate within.
+fn workspace_root() -> Result<PathBuf, String> {
+    if let Ok(slot) = WORKSPACE_ROOT.lock() {
+        if let Some(root) = slot.as_ref() {
+            return Ok(root.clone());
+        }
+    }
+    std::env::current_dir().map_err(|error| error.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolSpec {
     pub name: &'static str,
@@ -2449,7 +2478,7 @@ fn branch_divergence_output(
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_read_file(input: ReadFileInput) -> Result<String, String> {
-    let workspace = std::env::current_dir().map_err(|error| error.to_string())?;
+    let workspace = workspace_root()?;
     to_pretty_json(
         read_file_in_workspace(&input.path, input.offset, input.limit, &workspace)
             .map_err(io_to_string)?,
@@ -2458,7 +2487,7 @@ fn run_read_file(input: ReadFileInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_write_file(input: WriteFileInput) -> Result<String, String> {
-    let workspace = std::env::current_dir().map_err(|error| error.to_string())?;
+    let workspace = workspace_root()?;
     to_pretty_json(
         write_file_in_workspace(&input.path, &input.content, &workspace).map_err(io_to_string)?,
     )
@@ -2466,7 +2495,7 @@ fn run_write_file(input: WriteFileInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_edit_file(input: EditFileInput) -> Result<String, String> {
-    let workspace = std::env::current_dir().map_err(|error| error.to_string())?;
+    let workspace = workspace_root()?;
     to_pretty_json(
         edit_file_in_workspace(
             &input.path,
@@ -2481,7 +2510,7 @@ fn run_edit_file(input: EditFileInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_glob_search(input: GlobSearchInputValue) -> Result<String, String> {
-    let workspace = std::env::current_dir().map_err(|error| error.to_string())?;
+    let workspace = workspace_root()?;
     to_pretty_json(
         glob_search_in_workspace(&input.pattern, input.path.as_deref(), &workspace)
             .map_err(io_to_string)?,
@@ -2490,7 +2519,7 @@ fn run_glob_search(input: GlobSearchInputValue) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_grep_search(input: GrepSearchInput) -> Result<String, String> {
-    let workspace = std::env::current_dir().map_err(|error| error.to_string())?;
+    let workspace = workspace_root()?;
     to_pretty_json(grep_search_in_workspace(&input, &workspace).map_err(io_to_string)?)
 }
 

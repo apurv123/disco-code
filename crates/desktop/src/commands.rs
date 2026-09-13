@@ -18,6 +18,7 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use crate::agent;
+use crate::workspace::Workspace;
 
 /// Cancel flags for the turns currently in flight, keyed by conversation.
 ///
@@ -302,10 +303,26 @@ pub async fn send_prompt(
     model: String,
     enhance: bool,
     reasoning: bool,
+    project_root: Option<String>,
 ) -> Result<(), String> {
     let _ = &app;
+    // A folder that has gone away since it was chosen fails the turn rather
+    // than silently falling back to writing somewhere the user is not looking.
+    let workspace = match project_root.as_deref().filter(|raw| !raw.trim().is_empty()) {
+        Some(raw) => Some(Workspace::open(raw)?),
+        None => None,
+    };
     let cancel = begin_turn(&turn_id);
-    let result = run_turn(&channel, &request, &model, enhance, reasoning, &cancel).await;
+    let result = run_turn(
+        &channel,
+        &request,
+        &model,
+        enhance,
+        reasoning,
+        workspace.as_ref(),
+        &cancel,
+    )
+    .await;
     end_turn(&turn_id, &cancel);
 
     match result {
@@ -319,12 +336,48 @@ pub async fn send_prompt(
     }
 }
 
+/// Asks the user for the folder the model may create and change files in.
+///
+/// Writing is enabled without a per-call prompt, so choosing this folder is the
+/// user's one deliberate act of consent — which is why it is a native picker
+/// rather than a path typed into the page.
+///
+/// Returns `None` when the dialog is dismissed, which is a normal outcome and
+/// not an error.
+#[tauri::command]
+pub async fn choose_project_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("Choose the folder Disco Code may edit")
+        .pick_folder(move |picked| {
+            let _ = tx.send(picked);
+        });
+
+    let picked = rx
+        .await
+        .map_err(|_| "The folder picker closed unexpectedly.".to_string())?;
+
+    match picked {
+        Some(path) => {
+            // Validated here so a folder that cannot be opened is reported at
+            // the moment of choosing, not on the first attempted write.
+            let workspace = Workspace::open(&path.to_string())?;
+            Ok(Some(workspace.label()))
+        }
+        None => Ok(None),
+    }
+}
+
 async fn run_turn(
     channel: &tauri::ipc::Channel<TurnEvent>,
     request: &str,
     model: &str,
     enhance: bool,
     reasoning: bool,
+    workspace: Option<&Workspace>,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(), String> {
     let stages: Vec<runtime::enhance::Stage> = if enhance {
@@ -334,7 +387,10 @@ async fn run_turn(
     };
 
     let client = api::ProviderClient::from_model(model).map_err(|error| error.to_string())?;
-    let system = agent::system_prompt(&chrono::Local::now().format("%Y-%m-%d").to_string());
+    let system = agent::system_prompt(
+        &chrono::Local::now().format("%Y-%m-%d").to_string(),
+        workspace,
+    );
     let sink = ChannelSink { channel };
 
     if stages.is_empty() {
@@ -344,6 +400,7 @@ async fn run_turn(
             system,
             request.to_string(),
             reasoning,
+            workspace,
             cancel,
             &sink,
         )
@@ -378,6 +435,7 @@ async fn run_turn(
             system.clone(),
             prompt.render_stage(*stage, &carry),
             reasoning,
+            workspace,
             cancel,
             &sink,
         )
