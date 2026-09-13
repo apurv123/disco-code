@@ -29,8 +29,8 @@ use runtime::{
     BashCommandOutput, BranchFreshness, ConfigLoader, ContentBlock, ConversationMessage,
     ConversationRuntime, GrepSearchInput, LaneCommitProvenance, LaneEvent, LaneEventBlocker,
     LaneEventName, LaneEventStatus, LaneFailureClass, McpDegradedReport, MessageRole,
-    PermissionMode, PermissionPolicy, ProviderFallbackConfig, RuntimeError,
-    Session, TaskPacket, ToolError, ToolExecutor,
+    PermissionMode, PermissionPolicy, ProviderFallbackConfig, RuntimeError, Session, TaskPacket,
+    ToolError, ToolExecutor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -2629,11 +2629,11 @@ fn path_within_current_workspace(path: &str, allow_missing: bool) -> bool {
             '"' | '\'' | '`' | ',' | ';' | ')' | '(' | '[' | ']' | '{' | '}'
         )
     });
-    if looks_like_windows_absolute_path(trimmed) {
+    if cfg!(not(windows)) && looks_like_windows_absolute_path(trimmed) {
         return false;
     }
 
-    let Ok(cwd) = std::env::current_dir() else {
+    let Ok(cwd) = workspace_root() else {
         return false;
     };
     let cwd = cwd.canonicalize().unwrap_or(cwd);
@@ -6231,8 +6231,12 @@ struct ReplRuntime {
 fn resolve_repl_runtime(language: &str) -> Result<ReplRuntime, String> {
     match language.trim().to_ascii_lowercase().as_str() {
         "python" | "py" => Ok(ReplRuntime {
-            program: detect_first_command(&["python3", "python"])
-                .ok_or_else(|| String::from("python runtime not found"))?,
+            program: detect_first_command(if cfg!(windows) {
+                &["python", "python3"]
+            } else {
+                &["python3", "python"]
+            })
+            .ok_or_else(|| String::from("python runtime not found"))?,
             args: &["-c"],
         }),
         "javascript" | "js" | "node" => Ok(ReplRuntime {
@@ -6577,25 +6581,42 @@ fn execute_powershell(input: PowerShellInput) -> std::io::Result<runtime::BashCo
     }
     let shell = detect_powershell_shell()?;
     execute_shell_command(
-        shell,
+        &shell,
         &input.command,
         input.timeout,
         input.run_in_background,
     )
 }
 
-fn detect_powershell_shell() -> std::io::Result<&'static str> {
+fn detect_powershell_shell() -> std::io::Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(shell) = POWERSHELL_SHELL_OVERRIDE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return shell.ok_or_else(powershell_not_found_error);
+    }
+
     if command_exists("pwsh") {
-        Ok("pwsh")
+        Ok(PathBuf::from("pwsh"))
     } else if command_exists("powershell") {
-        Ok("powershell")
+        Ok(PathBuf::from("powershell"))
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "PowerShell executable not found (expected `pwsh` or `powershell` in PATH)",
-        ))
+        Err(powershell_not_found_error())
     }
 }
+
+fn powershell_not_found_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "PowerShell executable not found (expected `pwsh` or `powershell` in PATH)",
+    )
+}
+
+#[cfg(test)]
+static POWERSHELL_SHELL_OVERRIDE: std::sync::Mutex<Option<Option<PathBuf>>> =
+    std::sync::Mutex::new(None);
 
 fn command_exists(command: &str) -> bool {
     std::process::Command::new("sh")
@@ -6607,7 +6628,7 @@ fn command_exists(command: &str) -> bool {
 
 #[allow(clippy::too_many_lines)]
 fn execute_shell_command(
-    shell: &str,
+    shell: &Path,
     command: &str,
     timeout: Option<u64>,
     run_in_background: Option<bool>,
@@ -6866,10 +6887,75 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        env_lock()
+    struct ProcessStateGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        cwd: PathBuf,
+        env: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        workspace_root: Option<PathBuf>,
+        powershell_shell_override: Option<Option<PathBuf>>,
+    }
+
+    impl Drop for ProcessStateGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.cwd);
+            for (name, value) in &self.env {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            super::set_workspace_root(self.workspace_root.clone());
+            *super::POWERSHELL_SHELL_OVERRIDE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                self.powershell_shell_override.clone();
+        }
+    }
+
+    fn env_guard() -> ProcessStateGuard {
+        let lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = [
+            "HOME",
+            "USERPROFILE",
+            "CLAW_CONFIG_HOME",
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "CLAWD_TODO_STORE",
+            "CLAWD_AGENT_STORE",
+            "CLAWD_WEB_SEARCH_BASE_URL",
+            "ANTHROPIC_API_KEY",
+            "XAI_API_KEY",
+            "PATH",
+        ]
+        .into_iter()
+        .map(|name| (name, std::env::var_os(name)))
+        .collect();
+        let workspace_root = super::WORKSPACE_ROOT
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let powershell_shell_override = super::POWERSHELL_SHELL_OVERRIDE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        super::set_workspace_root(None);
+        *super::POWERSHELL_SHELL_OVERRIDE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        ProcessStateGuard {
+            _lock: lock,
+            cwd: std::env::current_dir().expect("current directory"),
+            env,
+            workspace_root,
+            powershell_shell_override,
+        }
+    }
+
+    fn path_ends_with(path: &serde_json::Value, components: &[&str]) -> bool {
+        let suffix = components.iter().collect::<PathBuf>();
+        Path::new(path.as_str().expect("path")).ends_with(suffix)
     }
 
     #[test]
@@ -7138,7 +7224,8 @@ mod tests {
         fs::create_dir_all(&claw_dir).expect("create .claw dir");
         // Use the actual OS temp dir so the worktree path matches the allowlist
         let tmp_root = std::env::temp_dir().to_str().expect("utf-8").to_string();
-        let settings = format!("{{\"trustedRoots\": [\"{tmp_root}\"]}}");
+        let settings = serde_json::to_string(&json!({ "trustedRoots": [tmp_root] }))
+            .expect("serialize settings");
         fs::write(claw_dir.join("settings.json"), settings).expect("write settings");
 
         // WorkerCreate with no per-call trusted_roots — config should supply them
@@ -7907,9 +7994,7 @@ mod tests {
         // sets CLAWD_WEB_SEARCH_BASE_URL. Without the lock, parallel test
         // runners can interleave the set/remove calls and cause assertion
         // failures on the wrong port.
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let server = TestServer::spawn(Arc::new(|request_line: &str| {
             assert!(request_line.contains("GET /search?q=rust+web+search "));
             HttpResponse::html(
@@ -7954,9 +8039,7 @@ mod tests {
 
     #[test]
     fn web_search_handles_generic_links_and_invalid_base_url() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let server = TestServer::spawn(Arc::new(|request_line: &str| {
             assert!(request_line.contains("GET /fallback?q=generic+links "));
             HttpResponse::html(
@@ -8006,9 +8089,7 @@ mod tests {
     #[test]
     fn web_search_decodes_absolute_duckduckgo_redirect_urls() {
         // given
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let server = TestServer::spawn(Arc::new(|request_line: &str| {
             assert!(request_line.contains("GET /search?q=duckduckgo+redirects "));
             HttpResponse::html(
@@ -8052,9 +8133,7 @@ mod tests {
     #[test]
     fn web_search_decodes_protocol_relative_duckduckgo_redirect_urls() {
         // given
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let server = TestServer::spawn(Arc::new(|request_line: &str| {
             assert!(request_line.contains("GET /search?q=duckduckgo+protocol+relative "));
             HttpResponse::html(
@@ -8157,9 +8236,7 @@ mod tests {
 
     #[test]
     fn todo_write_persists_and_returns_previous_state() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let path = temp_path("todos.json");
         std::env::set_var("CLAWD_TODO_STORE", &path);
 
@@ -8204,9 +8281,7 @@ mod tests {
 
     #[test]
     fn todo_write_rejects_invalid_payloads_and_sets_verification_nudge() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let path = temp_path("todos-errors.json");
         std::env::set_var("CLAWD_TODO_STORE", &path);
 
@@ -8280,10 +8355,7 @@ mod tests {
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(output["skill"], "help");
-        assert!(output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with("/help/SKILL.md"));
+        assert!(path_ends_with(&output["path"], &["help", "SKILL.md"]));
         assert!(output["prompt"]
             .as_str()
             .expect("prompt")
@@ -8299,10 +8371,10 @@ mod tests {
         let dollar_output: serde_json::Value =
             serde_json::from_str(&dollar_result).expect("valid json");
         assert_eq!(dollar_output["skill"], "$help");
-        assert!(dollar_output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with("/help/SKILL.md"));
+        assert!(path_ends_with(
+            &dollar_output["path"],
+            &["help", "SKILL.md"]
+        ));
 
         if let Some(home) = original_home {
             std::env::set_var("HOME", home);
@@ -8338,19 +8410,19 @@ mod tests {
             .expect("project-local skill should resolve");
         let skill_output: serde_json::Value =
             serde_json::from_str(&skill_result).expect("valid json");
-        assert!(skill_output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with(".claw/skills/plan/SKILL.md"));
+        assert!(path_ends_with(
+            &skill_output["path"],
+            &[".claw", "skills", "plan", "SKILL.md"]
+        ));
 
         let command_result = execute_tool("Skill", &json!({ "skill": "/handoff" }))
             .expect("legacy command should resolve");
         let command_output: serde_json::Value =
             serde_json::from_str(&command_result).expect("valid json");
-        assert!(command_output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with(".claw/commands/handoff.md"));
+        assert!(path_ends_with(
+            &command_output["path"],
+            &[".claw", "commands", "handoff.md"]
+        ));
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         fs::remove_dir_all(root).expect("temp project should clean up");
@@ -8385,10 +8457,10 @@ mod tests {
             .expect("project-local skill should resolve");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-        assert!(output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with(".claude/skills/trace/SKILL.md"));
+        assert!(path_ends_with(
+            &output["path"],
+            &[".claude", "skills", "trace", "SKILL.md"]
+        ));
         assert_eq!(output["description"], "Project-local trace helper");
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
@@ -8447,15 +8519,15 @@ mod tests {
         let omc_output: serde_json::Value = serde_json::from_str(&omc_result).expect("valid json");
         let agents_output: serde_json::Value =
             serde_json::from_str(&agents_result).expect("valid json");
-        assert!(omc_output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with(".omc/skills/hud/SKILL.md"));
+        assert!(path_ends_with(
+            &omc_output["path"],
+            &[".omc", "skills", "hud", "SKILL.md"]
+        ));
         assert_eq!(omc_output["description"], "Project-local OMC HUD helper");
-        assert!(agents_output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with(".agents/skills/trace/SKILL.md"));
+        assert!(path_ends_with(
+            &agents_output["path"],
+            &[".agents", "skills", "trace", "SKILL.md"]
+        ));
         assert_eq!(
             agents_output["description"],
             "Project-local agents compatibility helper"
@@ -8507,10 +8579,10 @@ mod tests {
             .expect("learned skill should resolve");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-        assert!(output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with("skills/omc-learned/learned/SKILL.md"));
+        assert!(path_ends_with(
+            &output["path"],
+            &["skills", "omc-learned", "learned", "SKILL.md"]
+        ));
         assert_eq!(output["description"], "Learned OMC skill");
 
         match original_home {
@@ -8566,20 +8638,20 @@ mod tests {
             execute_tool("Skill", &json!({ "skill": "statusline" })).expect("direct skill");
         let direct_skill_output: serde_json::Value =
             serde_json::from_str(&direct_skill).expect("valid skill json");
-        assert!(direct_skill_output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with("skills/statusline/SKILL.md"));
+        assert!(path_ends_with(
+            &direct_skill_output["path"],
+            &["skills", "statusline", "SKILL.md"]
+        ));
         assert_eq!(direct_skill_output["description"], "Claude config skill");
 
         let legacy_command =
             execute_tool("Skill", &json!({ "skill": "doctor-check" })).expect("direct command");
         let legacy_command_output: serde_json::Value =
             serde_json::from_str(&legacy_command).expect("valid command json");
-        assert!(legacy_command_output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with("commands/doctor-check.md"));
+        assert!(path_ends_with(
+            &legacy_command_output["path"],
+            &["commands", "doctor-check.md"]
+        ));
         assert_eq!(
             legacy_command_output["description"],
             "Claude config command"
@@ -8633,10 +8705,10 @@ mod tests {
             .expect("legacy command markdown should resolve");
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-        assert!(output["path"]
-            .as_str()
-            .expect("path")
-            .ends_with(".claude/commands/team.md"));
+        assert!(path_ends_with(
+            &output["path"],
+            &[".claude", "commands", "team.md"]
+        ));
         assert_eq!(output["description"], "Legacy team workflow");
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
@@ -8690,9 +8762,7 @@ mod tests {
 
     #[test]
     fn agent_persists_handoff_metadata() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let dir = temp_path("agent-store");
         std::env::set_var("CLAWD_AGENT_STORE", &dir);
         let captured = Arc::new(Mutex::new(None::<AgentJob>));
@@ -8773,9 +8843,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn agent_fake_runner_can_persist_completion_and_failure() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let dir = temp_path("agent-runner");
         std::env::set_var("CLAWD_AGENT_STORE", &dir);
 
@@ -9375,7 +9443,7 @@ mod tests {
         std::env::set_current_dir(previous).expect("restore current dir");
 
         // then: the prompt renders a generic model family identity
-        assert!(prompt.contains("Model family: an AI assistant"));
+        assert!(prompt.contains("Model family: a local open-weights model running via Ollama"));
         assert!(!prompt.contains("Model family: Claude Opus 4.6"));
 
         fs::remove_dir_all(root).expect("cleanup temp workspace");
@@ -9416,9 +9484,7 @@ mod tests {
 
     #[test]
     fn subagent_runtime_executes_tool_loop_with_isolated_session() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("subagent-runtime");
         std::fs::create_dir_all(&root).expect("create root");
         let path = root.join("subagent-input.txt");
@@ -9663,9 +9729,7 @@ mod tests {
 
     #[test]
     fn bash_workspace_tests_are_blocked_when_branch_is_behind_main() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("workspace-test-preflight");
         let original_dir = std::env::current_dir().expect("cwd");
         init_git_repo(&root);
@@ -9713,9 +9777,7 @@ mod tests {
 
     #[test]
     fn bash_targeted_tests_skip_branch_preflight() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("targeted-test-no-preflight");
         let original_dir = std::env::current_dir().expect("cwd");
         init_git_repo(&root);
@@ -9747,9 +9809,7 @@ mod tests {
 
     #[test]
     fn file_tools_cover_read_write_and_edit_behaviors() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("fs-suite");
         fs::create_dir_all(&root).expect("create root");
         let original_dir = std::env::current_dir().expect("cwd");
@@ -9858,9 +9918,7 @@ mod tests {
 
     #[test]
     fn glob_and_grep_tools_cover_success_and_errors() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("search-suite");
         fs::create_dir_all(root.join("nested")).expect("create root");
         let original_dir = std::env::current_dir().expect("cwd");
@@ -9877,10 +9935,10 @@ mod tests {
             .expect("glob should succeed");
         let globbed_output: serde_json::Value = serde_json::from_str(&globbed).expect("json");
         assert_eq!(globbed_output["numFiles"], 1);
-        assert!(globbed_output["filenames"][0]
-            .as_str()
-            .expect("filename")
-            .ends_with("nested/lib.rs"));
+        assert!(path_ends_with(
+            &globbed_output["filenames"][0],
+            &["nested", "lib.rs"]
+        ));
 
         let glob_error = execute_tool("glob_search", &json!({ "pattern": "[" }))
             .expect_err("invalid glob should fail");
@@ -9930,9 +9988,7 @@ mod tests {
 
     #[test]
     fn file_tools_reject_paths_outside_current_workspace() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("workspace-scope");
         let outside = temp_path("workspace-scope-outside");
         fs::create_dir_all(&root).expect("create root");
@@ -9978,9 +10034,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn file_tools_reject_symlink_escape_from_current_workspace() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("workspace-symlink-scope");
         let outside = temp_path("workspace-symlink-outside");
         fs::create_dir_all(&root).expect("create root");
@@ -10060,9 +10114,7 @@ mod tests {
 
     #[test]
     fn config_reads_and_writes_supported_values() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = std::env::temp_dir().join(format!(
             "clawd-config-{}",
             std::time::SystemTime::now()
@@ -10126,9 +10178,7 @@ mod tests {
 
     #[test]
     fn enter_and_exit_plan_mode_round_trip_existing_local_override() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = std::env::temp_dir().join(format!(
             "clawd-plan-mode-{}",
             std::time::SystemTime::now()
@@ -10199,9 +10249,7 @@ mod tests {
 
     #[test]
     fn exit_plan_mode_clears_override_when_enter_created_it_from_empty_local_state() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = std::env::temp_dir().join(format!(
             "clawd-plan-mode-empty-{}",
             std::time::SystemTime::now()
@@ -10321,9 +10369,7 @@ mod tests {
 
     #[test]
     fn powershell_runs_via_stub_shell() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let dir = std::env::temp_dir().join(format!(
             "clawd-pwsh-bin-{}",
             std::time::SystemTime::now()
@@ -10332,7 +10378,11 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).expect("create dir");
+        #[cfg(unix)]
         let script = dir.join("pwsh");
+        #[cfg(windows)]
+        let script = dir.join("pwsh.cmd");
+        #[cfg(unix)]
         std::fs::write(
             &script,
             r#"#!/bin/sh
@@ -10342,13 +10392,17 @@ printf 'pwsh:%s' "$1"
 "#,
         )
         .expect("write script");
+        #[cfg(windows)]
+        std::fs::write(&script, "@echo off\r\n<nul set /p =pwsh:%~4\r\n").expect("write script");
+        #[cfg(unix)]
         std::process::Command::new("/bin/chmod")
             .arg("+x")
             .arg(&script)
             .status()
             .expect("chmod");
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", dir.display(), original_path));
+        *super::POWERSHELL_SHELL_OVERRIDE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Some(script));
 
         let result = execute_tool(
             "PowerShell",
@@ -10362,7 +10416,7 @@ printf 'pwsh:%s' "$1"
         )
         .expect("PowerShell background should succeed");
 
-        std::env::set_var("PATH", original_path);
+        std::thread::sleep(Duration::from_millis(50));
         let _ = std::fs::remove_dir_all(dir);
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("json");
@@ -10377,25 +10431,13 @@ printf 'pwsh:%s' "$1"
 
     #[test]
     fn powershell_errors_when_shell_is_missing() {
-        let _guard = env_lock()
+        let _guard = env_guard();
+        *super::POWERSHELL_SHELL_OVERRIDE
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        let empty_dir = std::env::temp_dir().join(format!(
-            "clawd-empty-bin-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&empty_dir).expect("create empty dir");
-        std::env::set_var("PATH", empty_dir.display().to_string());
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(None);
 
         let err = execute_tool("PowerShell", &json!({"command": "Write-Output hello"}))
             .expect_err("PowerShell should fail when shell is missing");
-
-        std::env::set_var("PATH", original_path);
-        let _ = std::fs::remove_dir_all(empty_dir);
 
         assert!(err.contains("PowerShell executable not found"));
     }
@@ -10489,9 +10531,7 @@ printf 'pwsh:%s' "$1"
     #[test]
     #[cfg(unix)]
     fn given_workspace_write_enforcer_when_bash_reads_symlink_escape_then_denied() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("bash-symlink-scope");
         let outside = temp_path("bash-symlink-outside");
         fs::create_dir_all(&root).expect("create root");
@@ -10548,9 +10588,7 @@ printf 'pwsh:%s' "$1"
 
     #[test]
     fn given_read_only_enforcer_when_read_file_then_not_permission_denied() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let root = temp_path("perm-read");
         fs::create_dir_all(&root).expect("create root");
         let file = root.join("readable.txt");
@@ -10578,9 +10616,7 @@ printf 'pwsh:%s' "$1"
 
     #[test]
     fn given_no_enforcer_when_bash_then_executes_normally() {
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let registry = super::GlobalToolRegistry::builtin();
         let result = registry
             .execute("bash", &json!({ "command": "printf 'ok'" }))
@@ -10592,9 +10628,7 @@ printf 'pwsh:%s' "$1"
     #[test]
     fn provider_runtime_client_chain_uses_only_primary_when_no_fallbacks_configured() {
         // given
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let original_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
         std::env::set_var("ANTHROPIC_API_KEY", "anthropic-test-key");
         let fallback_config = ProviderFallbackConfig::default();
@@ -10620,9 +10654,7 @@ printf 'pwsh:%s' "$1"
     #[test]
     fn provider_runtime_client_chain_appends_configured_fallbacks_in_order() {
         // given
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let original_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
         let original_xai = std::env::var_os("XAI_API_KEY");
         std::env::set_var("ANTHROPIC_API_KEY", "anthropic-test-key");
@@ -10659,9 +10691,7 @@ printf 'pwsh:%s' "$1"
     #[test]
     fn provider_runtime_client_chain_primary_override_replaces_constructor_model() {
         // given
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let original_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
         let original_xai = std::env::var_os("XAI_API_KEY");
         std::env::set_var("ANTHROPIC_API_KEY", "anthropic-test-key");
@@ -10697,9 +10727,7 @@ printf 'pwsh:%s' "$1"
     #[test]
     fn provider_runtime_client_chain_keeps_every_fallback_since_none_need_credentials() {
         // given: fallbacks that previously required cloud credentials to build
-        let _guard = env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_guard();
         let original_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
         let original_xai = std::env::var_os("XAI_API_KEY");
         std::env::remove_var("ANTHROPIC_API_KEY");
