@@ -186,12 +186,21 @@ pub async fn run(
             ..Default::default()
         };
 
-        let step_result = stream_step(client, &request, cancel, sink).await?;
+        let mut step_result = stream_step(client, &request, cancel, sink).await?;
         if step_result.cancelled {
             return Ok(Outcome {
                 text: transcript,
                 cancelled: true,
             });
+        }
+
+        // Small local models occasionally choose a filesystem reader for an
+        // HTTP URL after WebSearch. Repair that envelope mistake before it
+        // reaches Windows path handling: the intent is unambiguously to read
+        // the page, and passing the URL to grep_search only produces
+        // "filename or volume label syntax is incorrect".
+        for call in &mut step_result.calls {
+            normalize_tool_call(call);
         }
 
         transcript.push_str(&step_result.text);
@@ -278,6 +287,46 @@ struct StepResult {
     text: String,
     calls: Vec<ToolCall>,
     cancelled: bool,
+}
+
+/// Repairs unambiguous tool-envelope mistakes made by small local models.
+///
+/// This intentionally does not guess broadly. Only an absolute HTTP(S) URL
+/// sent to a file reader is converted to WebFetch, and a WebFetch call missing
+/// its required prompt receives a neutral extraction instruction.
+fn normalize_tool_call(call: &mut ToolCall) {
+    let path = call
+        .input
+        .get("path")
+        .or_else(|| call.input.get("file_path"))
+        .and_then(Value::as_str);
+    let is_file_reader = matches!(call.name.as_str(), "read_file" | "grep_search");
+
+    if is_file_reader {
+        if let Some(url) = path.filter(|candidate| is_http_url(candidate)) {
+            let prompt = call
+                .input
+                .get("pattern")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("Extract the page content relevant to the user's request.");
+            call.name = "WebFetch".to_string();
+            call.input = serde_json::json!({ "url": url, "prompt": prompt });
+            return;
+        }
+    }
+
+    if call.name == "WebFetch"
+        && call.input.get("url").and_then(Value::as_str).is_some()
+        && call.input.get("prompt").and_then(Value::as_str).is_none()
+    {
+        call.input["prompt"] =
+            Value::String("Extract the page content relevant to the user's request.".to_string());
+    }
+}
+
+fn is_http_url(candidate: &str) -> bool {
+    reqwest::Url::parse(candidate).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
 }
 
 /// Recovers a tool call that the model wrote as text instead of calling.
@@ -691,6 +740,68 @@ mod tests {
         assert!(!looks_like_tool_json("Today's headlines are"));
     }
 
+    #[test]
+    fn a_url_sent_to_grep_is_repaired_to_web_fetch() {
+        let mut call = ToolCall {
+            id: "call-1".to_string(),
+            name: "grep_search".to_string(),
+            input: serde_json::json!({
+                "path": "https://example.com/news/today",
+                "pattern": "headline"
+            }),
+        };
+
+        normalize_tool_call(&mut call);
+
+        assert_eq!(call.name, "WebFetch");
+        assert_eq!(call.input["url"], "https://example.com/news/today");
+        assert_eq!(call.input["prompt"], "headline");
+        assert_eq!(call.id, "call-1", "the protocol call id must not change");
+    }
+
+    #[test]
+    fn ordinary_file_grep_is_not_rewritten() {
+        let mut call = ToolCall {
+            id: "call-2".to_string(),
+            name: "grep_search".to_string(),
+            input: serde_json::json!({ "path": "src", "pattern": "main" }),
+        };
+        let original = call.clone();
+
+        normalize_tool_call(&mut call);
+
+        assert_eq!(call.name, original.name);
+        assert_eq!(call.input, original.input);
+    }
+
+    #[test]
+    fn web_fetch_missing_its_required_prompt_is_completed() {
+        let mut call = ToolCall {
+            id: "call-3".to_string(),
+            name: "WebFetch".to_string(),
+            input: serde_json::json!({ "url": "https://example.com" }),
+        };
+
+        normalize_tool_call(&mut call);
+
+        assert!(call.input["prompt"]
+            .as_str()
+            .is_some_and(|prompt| !prompt.is_empty()));
+    }
+
+    #[test]
+    fn non_http_schemes_are_never_promoted_to_web_fetch() {
+        let mut call = ToolCall {
+            id: "call-4".to_string(),
+            name: "read_file".to_string(),
+            input: serde_json::json!({ "path": "file:///C:/secret.txt" }),
+        };
+
+        normalize_tool_call(&mut call);
+
+        assert_eq!(call.name, "read_file");
+    }
+
     /// Collects what the loop did, so a live run can be asserted on.
     #[derive(Default)]
     struct Recorder {
@@ -751,6 +862,13 @@ mod tests {
             "model answered a current-events question without searching; tools used: \
              {tools_used:?}, failures: {failures:?}, text: {}",
             outcome.text.chars().take(400).collect::<String>()
+        );
+        assert!(
+            !failures.iter().any(|failure| {
+                failure.contains("filename, directory name, or volume label syntax")
+                    || failure.contains("filename or volume label syntax")
+            }),
+            "an HTTP URL reached a Windows filesystem tool: {failures:?}"
         );
         assert!(
             !outcome.text.trim().is_empty(),
