@@ -23,14 +23,12 @@ Derived components:
 
     crates/api/              LLM transport layer and provider abstraction
     crates/commands/         Slash-command surface
-    crates/compat-harness/   Compatibility test harness
     crates/plugins/          Plugin discovery, hooks, lifecycle
     crates/runtime/          Session, permissions, policy engine, MCP,
                              sandbox, prompt construction, compaction
     crates/telemetry/        Local telemetry primitives
     crates/tools/            Built-in agent tool implementations
     crates/rusty-claude-cli/ Terminal client
-    crates/claw-analog/      Config, doctor, agent surfaces
     crates/claw-rag-service/ Local retrieval/embedding service
 
 The prompt-construction pipeline in crates/runtime/src/prompt.rs is inherited

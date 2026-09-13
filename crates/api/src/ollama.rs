@@ -47,6 +47,15 @@ pub struct Caps {
     pub vision: bool,
     /// Model emits a separate reasoning channel.
     pub thinking: bool,
+    /// Model generates text. Absent on embedding-only models.
+    pub completion: bool,
+    /// Model returns embedding vectors instead of text.
+    ///
+    /// Tracked separately from a missing `tools` capability because the two are
+    /// different kinds of failure: a chat model without tools is a weaker
+    /// version of the right thing, whereas an embedding model can never hold a
+    /// conversation no matter what the user changes.
+    pub embedding: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,7 +115,15 @@ impl Caps {
             tools: raw.iter().any(|c| c == "tools"),
             vision: raw.iter().any(|c| c == "vision"),
             thinking: raw.iter().any(|c| c == "thinking"),
+            completion: raw.iter().any(|c| c == "completion"),
+            embedding: raw.iter().any(|c| c == "embedding"),
         }
+    }
+
+    /// Whether this model can serve a conversation at all.
+    #[must_use]
+    pub const fn is_chat(&self) -> bool {
+        self.completion && !self.embedding
     }
 }
 
@@ -147,14 +164,17 @@ pub fn output(context: u32) -> u32 {
 
 /// Chooses a sensible default from the installed models.
 ///
-/// Tool-calling capability is preferred because the agent loop cannot function
-/// without it; a chat-only model is returned only when nothing better exists.
+/// Embedding-only models are excluded outright: they cannot answer a prompt, so
+/// resolving `auto` to one would produce a confusing failure deep on the
+/// inference path. Tool-calling capability is then preferred because the agent
+/// loop cannot function without it; a chat-only model is returned only when
+/// nothing better exists.
 #[must_use]
 pub fn pick(models: &[Model]) -> Option<&Model> {
-    models
-        .iter()
+    let chat = || models.iter().filter(|m| m.caps.is_chat());
+    chat()
         .find(|m| m.caps.tools)
-        .or_else(|| models.first())
+        .or_else(|| chat().next())
 }
 
 /// Model name meaning "whichever local model is best for the job".
@@ -365,6 +385,7 @@ mod tests {
             output: output(FALLBACK_CONTEXT),
             caps: Caps {
                 tools,
+                completion: true,
                 ..Caps::default()
             },
         }
@@ -389,6 +410,44 @@ mod tests {
     #[test]
     fn pick_returns_nothing_when_no_models_are_installed() {
         assert!(pick(&[]).is_none());
+    }
+
+    #[test]
+    fn pick_never_returns_an_embedding_model() {
+        let mut embedder = model("nomic-embed-text:latest", false);
+        embedder.caps = Caps {
+            embedding: true,
+            completion: false,
+            ..Caps::default()
+        };
+        let chat = model("granite4.1:8b", true);
+
+        // Ordered with the embedder first so a naive "first installed model"
+        // fallback would pick it.
+        assert_eq!(
+            pick(&[embedder.clone(), chat]).map(|m| m.id.as_str()),
+            Some("granite4.1:8b"),
+            "an embedding model cannot answer a prompt"
+        );
+        assert!(
+            pick(&[embedder]).is_none(),
+            "no chat model installed must read as none, not as an unusable one"
+        );
+    }
+
+    #[test]
+    fn embedding_models_are_not_chat_models() {
+        let caps = Caps::parse(&["embedding".to_string()]);
+        assert!(caps.embedding);
+        assert!(!caps.completion);
+        assert!(
+            !caps.is_chat(),
+            "an embedding model has no decoder and cannot hold a conversation"
+        );
+        assert!(
+            Caps::parse(&["completion".to_string(), "tools".to_string()]).is_chat(),
+            "a text-generating model is a chat model even before tool support"
+        );
     }
 
     #[test]

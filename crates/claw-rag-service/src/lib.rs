@@ -107,4 +107,43 @@ mod tests {
         assert!(r.hits.iter().all(|h| h.path.contains(':')));
         std::env::remove_var("CLAW_RAG_MOCK_PROVIDERS");
     }
+
+    /// Decisive integration proof for the desktop attachment path: the real
+    /// local embedding model indexes a document and retrieves its unique fact.
+    #[tokio::test]
+    #[ignore = "requires a running Ollama daemon with nomic-embed-text"]
+    async fn live_ollama_attachment_roundtrip() {
+        let dir = tempdir().unwrap();
+        let documents = dir.path().join("attachments");
+        std::fs::create_dir_all(&documents).unwrap();
+        std::fs::write(
+            documents.join("reference.md"),
+            "The Disco lighthouse access code is CERULEAN-4821.",
+        )
+        .unwrap();
+        let db = dir.path().join("chat.sqlite");
+        let client = Client::new();
+        let cfg = EmbedConfig::from_env().expect("local embedding config");
+
+        let stats = run_ingest(std::slice::from_ref(&documents), &db, &cfg, &client)
+            .await
+            .expect("index attached document");
+        assert!(stats.embeddings_written > 0);
+
+        let response = query_index(
+            &db,
+            &client,
+            &cfg,
+            &QueryRequest {
+                query: "What is the lighthouse access code?".to_string(),
+                top_k: 4,
+            },
+        )
+        .await
+        .expect("retrieve attached document");
+        assert!(response
+            .hits
+            .iter()
+            .any(|hit| hit.snippet.contains("CERULEAN-4821")));
+    }
 }

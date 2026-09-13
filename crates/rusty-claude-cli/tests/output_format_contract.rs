@@ -48,7 +48,7 @@ fn export_help_emits_bounded_json_when_requested_384() {
     assert_eq!(parsed["command"], "export");
     assert_eq!(
         parsed["usage"],
-        "claw export [--session <id|latest>] [--output <path>] [--output-format <format>]"
+        "disco export [--session <id|latest>] [--output <path>] [--output-format <format>]"
     );
     assert_eq!(parsed["defaults"]["session"], "latest");
     assert!(parsed["options"].as_array().expect("options").len() >= 4);
@@ -69,7 +69,7 @@ fn export_help_preserves_plaintext_in_text_mode_384() {
     );
     let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
     assert!(stdout.starts_with("Export\n"));
-    assert!(stdout.contains("Usage            claw export"));
+    assert!(stdout.contains("Usage            disco export"));
     serde_json::from_str::<Value>(&stdout).expect_err("text help should remain plaintext");
 }
 
@@ -96,7 +96,7 @@ fn assert_doctor_help_json_contract(parsed: &Value) {
     assert_eq!(parsed["status"], "ok");
     assert_eq!(parsed["topic"], "doctor");
     assert_eq!(parsed["command"], "doctor");
-    assert_eq!(parsed["usage"], "claw doctor [--output-format <format>]");
+    assert_eq!(parsed["usage"], "disco doctor [--output-format <format>]");
     assert_eq!(parsed["local_only"], true);
     assert_eq!(parsed["requires_credentials"], false);
     assert_eq!(parsed["requires_provider_request"], false);
@@ -129,7 +129,7 @@ fn doctor_help_text_stays_plaintext_and_local_702() {
     );
     let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
     assert!(stdout.starts_with("Doctor\n"));
-    assert!(stdout.contains("Usage            claw doctor"));
+    assert!(stdout.contains("Usage            disco doctor"));
     assert!(stdout.contains("no provider request or session resume required"));
     serde_json::from_str::<Value>(&stdout).expect_err("text help should remain plaintext");
 }
@@ -281,7 +281,7 @@ fn version_emits_json_when_requested() {
     assert!(
         parsed["human_readable"]
             .as_str()
-            .is_some_and(|text| text.contains("Claw Code")),
+            .is_some_and(|text| text.contains("disco Code")),
         "version JSON should keep text output only in human_readable: {parsed}"
     );
     let git_sha = parsed["git_sha"]
@@ -2630,7 +2630,7 @@ fn assert_non_empty_action(parsed: &Value, args: &[&str]) {
 }
 
 fn run_claw(current_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_claw"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_disco"));
     command.current_dir(current_dir).args(args);
     for key in ["CLAW_OUTPUT_FORMAT", "CLAW_LOG", "RUST_LOG"] {
         if !envs.iter().any(|(env_key, _)| *env_key == key) {
@@ -2657,7 +2657,7 @@ fn run_claw(current_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output 
 /// to convert a hang into a failure.
 const CLAW_WATCHDOG: Duration = Duration::from_secs(60);
 
-/// Runs `claw` under a deadline.
+/// Runs `disco` under a deadline.
 ///
 /// Without this a bug that stalls the CLI — an unbounded network wait, say —
 /// hangs the whole suite with no indication of which test is stuck, and the
@@ -2668,17 +2668,17 @@ fn run_with_watchdog(mut command: Command) -> Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("claw should launch");
+        .expect("disco should launch");
 
     let deadline = Instant::now() + CLAW_WATCHDOG;
     loop {
-        match child.try_wait().expect("claw status should be observable") {
+        match child.try_wait().expect("disco status should be observable") {
             Some(_) => break,
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
                 panic!(
-                    "claw exceeded the {CLAW_WATCHDOG:?} watchdog and was killed; \
+                    "disco exceeded the {CLAW_WATCHDOG:?} watchdog and was killed; \
                      this is a hang, not a slow test"
                 );
             }
@@ -2688,7 +2688,7 @@ fn run_with_watchdog(mut command: Command) -> Output {
 
     child
         .wait_with_output()
-        .expect("claw output should be readable")
+        .expect("disco output should be readable")
 }
 
 fn parse_json_stdout(output: &Output, context: &str) -> Value {
@@ -2767,7 +2767,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
 
 #[test]
 fn diff_json_has_status_and_result_field_702() {
-    // #458/#702: `claw diff --output-format json` must have status ∈ {ok,error}
+    // #458/#702: `disco diff --output-format json` must have status ∈ {ok,error}
     // and a `result` field to distinguish clean/changes/no-repo states.
     let root = unique_temp_dir("diff-json-status");
     fs::create_dir_all(&root).expect("temp dir should exist");
@@ -2860,13 +2860,13 @@ fn diff_json_changed_file_count_deduplication_733() {
         .expect("git commit");
 
     // Clean state: changed_file_count must be 0
-    let bin = env!("CARGO_BIN_EXE_claw");
+    let bin = env!("CARGO_BIN_EXE_disco");
     let clean = Command::new(bin)
         .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "diff"])
         .output()
-        .expect("claw diff clean");
+        .expect("disco diff clean");
     let clean_json: serde_json::Value =
         serde_json::from_slice(&clean.stdout).expect("diff clean stdout must be valid JSON");
     assert_eq!(clean_json["result"], "clean", "fresh repo must be clean");
@@ -2891,7 +2891,7 @@ fn diff_json_changed_file_count_deduplication_733() {
         .current_dir(&root)
         .args(["--output-format", "json", "diff"])
         .output()
-        .expect("claw diff dirty");
+        .expect("disco diff dirty");
     let dirty_json: serde_json::Value =
         serde_json::from_slice(&dirty.stdout).expect("diff dirty stdout must be valid JSON");
     assert_eq!(
@@ -2907,97 +2907,97 @@ fn diff_json_changed_file_count_deduplication_733() {
 
 #[test]
 fn prompt_no_arg_json_error_kind_750() {
-    // #751/#750/#823: `claw prompt --output-format json` with no prompt argument must emit
+    // #751/#750/#823: `disco prompt --output-format json` with no prompt argument must emit
     // error_kind:"missing_prompt" with stdout JSON, empty stderr, and a non-empty hint.
     // Before #823 the structured envelope could be routed to stderr, leaving stdout empty.
     use std::process::Command;
     let root = unique_temp_dir("prompt-no-arg");
     fs::create_dir_all(&root).expect("temp dir");
-    let bin = env!("CARGO_BIN_EXE_claw");
+    let bin = env!("CARGO_BIN_EXE_disco");
 
     let output = Command::new(bin)
         .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "prompt"])
         .output()
-        .expect("claw prompt should run");
+        .expect("disco prompt should run");
     assert!(
         !output.status.success(),
-        "claw prompt with no arg must exit non-zero"
+        "disco prompt with no arg must exit non-zero"
     );
     assert_eq!(
         output.status.code(),
         Some(1),
-        "claw prompt with no arg must exit rc=1 (#823)"
+        "disco prompt with no arg must exit rc=1 (#823)"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         stderr, "",
-        "claw prompt (no arg) --output-format json must keep stderr empty (#823); got: {stderr}"
+        "disco prompt (no arg) --output-format json must keep stderr empty (#823); got: {stderr}"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| {
         panic!(
-            "claw prompt (no arg) --output-format json must emit valid stdout JSON; got: {stdout}"
+            "disco prompt (no arg) --output-format json must emit valid stdout JSON; got: {stdout}"
         )
     });
     assert_eq!(
         parsed["error_kind"], "missing_prompt",
-        "claw prompt no-arg must have error_kind:missing_prompt (#750/#823); got: {parsed}"
+        "disco prompt no-arg must have error_kind:missing_prompt (#750/#823); got: {parsed}"
     );
     let hint = parsed["hint"].as_str().unwrap_or("");
     assert!(
         !hint.is_empty(),
-        "claw prompt no-arg hint must be non-empty (#750/#823)"
+        "disco prompt no-arg hint must be non-empty (#750/#823)"
     );
     assert!(
-        hint.contains("claw prompt") || hint.contains("echo"),
-        "hint should mention 'claw prompt' or 'echo': {hint}"
+        hint.contains("disco prompt") || hint.contains("echo"),
+        "hint should mention 'disco prompt' or 'echo': {hint}"
     );
 }
 
 #[test]
 fn prompt_empty_arg_json_stdout_missing_prompt_823() {
-    // #823: `claw --output-format json prompt ""` must match the missing prompt
+    // #823: `disco --output-format json prompt ""` must match the missing prompt
     // channel contract: rc=1, stdout JSON, error_kind:"missing_prompt", empty stderr.
     use std::process::Command;
     let root = unique_temp_dir("prompt-empty-arg-823");
     fs::create_dir_all(&root).expect("temp dir");
-    let bin = env!("CARGO_BIN_EXE_claw");
+    let bin = env!("CARGO_BIN_EXE_disco");
 
     let output = Command::new(bin)
         .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "prompt", ""])
         .output()
-        .expect("claw prompt empty arg should run");
+        .expect("disco prompt empty arg should run");
     assert_eq!(
         output.status.code(),
         Some(1),
-        "claw prompt empty arg must exit rc=1 (#823)"
+        "disco prompt empty arg must exit rc=1 (#823)"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         stderr, "",
-        "claw prompt empty arg --output-format json must keep stderr empty (#823); got: {stderr}"
+        "disco prompt empty arg --output-format json must keep stderr empty (#823); got: {stderr}"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| {
         panic!(
-            "claw prompt empty arg --output-format json must emit valid stdout JSON; got: {stdout}"
+            "disco prompt empty arg --output-format json must emit valid stdout JSON; got: {stdout}"
         )
     });
     assert_eq!(
         parsed["error_kind"], "missing_prompt",
-        "claw prompt empty arg must have error_kind:missing_prompt (#823); got: {parsed}"
+        "disco prompt empty arg must have error_kind:missing_prompt (#823); got: {parsed}"
     );
     assert_eq!(
         parsed["action"], "abort",
-        "claw prompt empty arg must retain abort action (#823); got: {parsed}"
+        "disco prompt empty arg must retain abort action (#823); got: {parsed}"
     );
     assert!(
         parsed["hint"].as_str().map_or(false, |h| !h.is_empty()),
-        "claw prompt empty arg missing_prompt hint must be non-empty (#823)"
+        "disco prompt empty arg missing_prompt hint must be non-empty (#823)"
     );
 }
 
@@ -3008,7 +3008,7 @@ fn flag_value_errors_have_error_kind_and_hint_756() {
     use std::process::Command;
     let root = unique_temp_dir("flag-value-errors");
     fs::create_dir_all(&root).expect("temp dir");
-    let bin = env!("CARGO_BIN_EXE_claw");
+    let bin = env!("CARGO_BIN_EXE_disco");
 
     // Case 1: --reasoning-effort with invalid value
     let out = Command::new(bin)
@@ -3016,7 +3016,7 @@ fn flag_value_errors_have_error_kind_and_hint_756() {
         .current_dir(&root)
         .args(["--output-format", "json", "--reasoning-effort", "HIGH"])
         .output()
-        .expect("claw --reasoning-effort HIGH should run");
+        .expect("disco --reasoning-effort HIGH should run");
     assert!(
         !out.status.success(),
         "invalid reasoning-effort must exit non-zero"
@@ -3047,7 +3047,7 @@ fn flag_value_errors_have_error_kind_and_hint_756() {
         .current_dir(&root)
         .args(["--output-format", "json", "--model"])
         .output()
-        .expect("claw --model (no value) should run");
+        .expect("disco --model (no value) should run");
     assert!(
         !out2.status.success(),
         "missing --model value must exit non-zero"
@@ -3251,7 +3251,7 @@ fn allowed_tools_errors_have_typed_json_and_alias_map_432() {
 
 #[test]
 fn short_p_flag_swallows_no_flags_755() {
-    // #755: `claw -p hello --output-format json` must parse --output-format json
+    // #755: `disco -p hello --output-format json` must parse --output-format json
     // as a flag rather than swallowing it as part of the prompt. Before #755,
     // args[index+1..].join(" ") consumed all remaining tokens into the prompt.
     // After #755, -p consumes exactly one token and remaining flags are parsed.
@@ -3260,7 +3260,7 @@ fn short_p_flag_swallows_no_flags_755() {
     use std::process::Command;
     let root = unique_temp_dir("short-p-flags");
     fs::create_dir_all(&root).expect("temp dir");
-    let bin = env!("CARGO_BIN_EXE_claw");
+    let bin = env!("CARGO_BIN_EXE_disco");
 
     // -p hello --output-format json: pointed at a dead daemon, this fails on the
     // provider path rather than the parse path, proving --output-format json was
@@ -3271,10 +3271,10 @@ fn short_p_flag_swallows_no_flags_755() {
         .args(["-p", "hello", "--output-format", "json"])
         .env("OLLAMA_HOST", "127.0.0.1:1")
         .output()
-        .expect("claw -p should run");
+        .expect("disco -p should run");
     assert!(
         !output.status.success(),
-        "claw -p hello --output-format json must exit non-zero (daemon unreachable)"
+        "disco -p hello --output-format json must exit non-zero (daemon unreachable)"
     );
     // #819/#820/#823: abort envelopes route to stdout in JSON mode
     let raw = String::from_utf8_lossy(&output.stdout)
@@ -3297,14 +3297,14 @@ fn short_p_flag_swallows_no_flags_755() {
         .current_dir(&root)
         .args(["--output-format", "json", "-p", "--model", "sonnet"])
         .output()
-        .expect("claw -p flag-as-prompt should run");
+        .expect("disco -p flag-as-prompt should run");
     let raw2 = String::from_utf8_lossy(&output2.stdout)
         .lines()
         .filter(|l| l.starts_with('{'))
         .collect::<Vec<_>>()
         .join("");
     let parsed2: serde_json::Value = serde_json::from_str(&raw2)
-        .unwrap_or_else(|_| panic!("claw -p --model must emit JSON to stdout; got: {raw2}"));
+        .unwrap_or_else(|_| panic!("disco -p --model must emit JSON to stdout; got: {raw2}"));
     assert_eq!(
         parsed2["error_kind"], "missing_prompt",
         "flag-like token after -p must be rejected as missing_prompt (#755): {parsed2}"
@@ -3317,23 +3317,23 @@ fn short_p_flag_swallows_no_flags_755() {
 
 #[test]
 fn short_p_flag_no_arg_json_error_kind_753() {
-    // #753: `claw --output-format json -p` (no prompt) must emit error_kind:"missing_prompt"
+    // #753: `disco --output-format json -p` (no prompt) must emit error_kind:"missing_prompt"
     // and non-empty hint. Before #753 it returned error_kind:"unknown" + hint:null.
     // Parity with #750 which fixed the explicit `prompt` verb.
     use std::process::Command;
     let root = unique_temp_dir("short-p-no-arg");
     fs::create_dir_all(&root).expect("temp dir");
-    let bin = env!("CARGO_BIN_EXE_claw");
+    let bin = env!("CARGO_BIN_EXE_disco");
 
     let output = Command::new(bin)
         .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "-p"])
         .output()
-        .expect("claw -p should run");
+        .expect("disco -p should run");
     assert!(
         !output.status.success(),
-        "claw -p with no arg must exit non-zero"
+        "disco -p with no arg must exit non-zero"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let raw = if stdout.trim().starts_with('{') {
@@ -3346,31 +3346,31 @@ fn short_p_flag_no_arg_json_error_kind_753() {
             .join("")
     };
     let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|_| {
-        panic!("claw -p (no arg) --output-format json must emit valid JSON; got: {raw}")
+        panic!("disco -p (no arg) --output-format json must emit valid JSON; got: {raw}")
     });
     assert_eq!(
         parsed["error_kind"], "missing_prompt",
-        "claw -p no-arg must have error_kind:missing_prompt (#753); got: {parsed}"
+        "disco -p no-arg must have error_kind:missing_prompt (#753); got: {parsed}"
     );
     let hint = parsed["hint"].as_str().unwrap_or("");
     assert!(
         !hint.is_empty(),
-        "claw -p no-arg hint must be non-empty (#753)"
+        "disco -p no-arg hint must be non-empty (#753)"
     );
     assert!(
-        hint.contains("claw -p") || hint.contains("claw prompt"),
-        "hint should mention 'claw -p' or 'claw prompt': {hint}"
+        hint.contains("disco -p") || hint.contains("disco prompt"),
+        "hint should mention 'disco -p' or 'disco prompt': {hint}"
     );
 }
 
 #[test]
 fn bare_slash_command_hint_745() {
-    // #747/#745: claw <slash-cmd> --output-format json must return non-null hint.
+    // #747/#745: disco <slash-cmd> --output-format json must return non-null hint.
     // bare_slash_command_guidance() previously had no \n so split_error_hint returned hint:null.
     use std::process::Command;
     let root = unique_temp_dir("bare-slash-hint");
     fs::create_dir_all(&root).expect("temp dir");
-    let bin = env!("CARGO_BIN_EXE_claw");
+    let bin = env!("CARGO_BIN_EXE_disco");
 
     // issue and pr are non-resume-supported; commit is resume-supported.
     // All must emit non-null hint in their interactive_only error envelope.
@@ -3381,7 +3381,7 @@ fn bare_slash_command_hint_745() {
             .args(["--output-format", "json", cmd])
             .env("ANTHROPIC_API_KEY", "test")
             .output()
-            .expect("claw should run");
+            .expect("disco should run");
         assert!(
             !output.status.success(),
             "claw {cmd} outside REPL must exit non-zero"
@@ -3414,13 +3414,13 @@ fn bare_slash_command_hint_745() {
 
 #[test]
 fn config_unsupported_section_json_hint_741() {
-    // #744/#741: claw config <unknown-section> --output-format json must return
+    // #744/#741: disco config <unknown-section> --output-format json must return
     // error_kind:unsupported_config_section with a non-null hint and supported_sections[].
     // This is the regression guard for #741 (hint was null before fix).
     use std::process::Command;
     let root = unique_temp_dir("config-unsupported-section");
     fs::create_dir_all(&root).expect("temp dir");
-    let bin = env!("CARGO_BIN_EXE_claw");
+    let bin = env!("CARGO_BIN_EXE_disco");
 
     for section in &["list", "show", "bogus"] {
         let output = Command::new(bin)
@@ -3428,10 +3428,10 @@ fn config_unsupported_section_json_hint_741() {
             .current_dir(&root)
             .args(["--output-format", "json", "config", section])
             .output()
-            .expect("claw config should run");
+            .expect("disco config should run");
         let stdout = String::from_utf8_lossy(&output.stdout);
         let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| {
-            panic!("claw config {section} --output-format json must emit valid JSON; got: {stdout}")
+            panic!("disco config {section} --output-format json must emit valid JSON; got: {stdout}")
         });
         assert_eq!(
             parsed["kind"], "config",
@@ -3467,13 +3467,13 @@ fn config_help_returns_structured_section_list_344() {
     use std::process::Command;
     let root = unique_temp_dir("config-help");
     fs::create_dir_all(&root).expect("temp dir");
-    let bin = env!("CARGO_BIN_EXE_claw");
+    let bin = env!("CARGO_BIN_EXE_disco");
     let output = Command::new(bin)
         .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "config", "help"])
         .output()
-        .expect("claw config help should run");
+        .expect("disco config help should run");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("config help should emit valid JSON");
@@ -3494,7 +3494,7 @@ fn config_help_returns_structured_section_list_344() {
 
 #[test]
 fn export_json_has_kind_702() {
-    // #458/#702: `claw export --output-format json` must emit kind:export.
+    // #458/#702: `disco export --output-format json` must emit kind:export.
     // We check only the kind field to avoid flakiness from session-store state.
     // A success path with an actual session would also carry status:ok.
     let root = unique_temp_dir("export-json-kind");
@@ -3502,14 +3502,14 @@ fn export_json_has_kind_702() {
 
     // Run without asserting exit code — may fail with no sessions or legacy sessions.
     use std::process::Command;
-    let bin = env!("CARGO_BIN_EXE_claw");
+    let bin = env!("CARGO_BIN_EXE_disco");
     let output = Command::new(bin)
         .env("OLLAMA_HOST", "127.0.0.1:1")
         .current_dir(&root)
         .args(["--output-format", "json", "export"])
         .env("ANTHROPIC_API_KEY", "test")
         .output()
-        .expect("claw binary should run");
+        .expect("disco binary should run");
 
     // On success stdout has kind:export; on failure stderr has type:error.
     // Either way, both envelopes must be valid JSON.
@@ -3629,7 +3629,7 @@ fn config_parse_error_has_typed_error_kind_and_hint_764() {
 
 #[test]
 fn login_logout_removed_subcommands_have_error_kind_and_hint_765() {
-    // #765: `claw login` and `claw logout` are removed; JSON envelope must carry
+    // #765: `disco login` and `disco logout` are removed; JSON envelope must carry
     // error_kind:removed_subcommand + non-null hint pointing to the env var migration.
     // Before fix: single-line error string → error_kind:"unknown" + hint:null.
     let root = unique_temp_dir("login-logout-removed-765");
@@ -3669,14 +3669,14 @@ fn login_logout_removed_subcommands_have_error_kind_and_hint_765() {
 
 #[test]
 fn diff_extra_args_have_typed_error_kind_and_hint_766() {
-    // #766: `claw diff --bogus` returned error_kind:"unknown" + hint:null.
+    // #766: `disco diff --bogus` returned error_kind:"unknown" + hint:null.
     // `diff` takes no arguments; extra args were unclassified with no remediation.
     let root = git_temp_dir("diff-extra-args-766");
 
     assert_diff_unexpected_extra_args_json(
         &root,
         &["--output-format", "json", "diff", "--bogus"],
-        "claw diff --bogus",
+        "disco diff --bogus",
     );
 }
 
@@ -3690,11 +3690,11 @@ fn diff_trailing_json_after_malformed_args_is_bounded_json_3129() {
     for (args, label) in [
         (
             &["diff", "--bogus-flag", "--output-format", "json"][..],
-            "claw diff --bogus-flag --output-format json",
+            "disco diff --bogus-flag --output-format json",
         ),
         (
             &["diff", "does-not-exist", "--output-format", "json"][..],
-            "claw diff does-not-exist --output-format json",
+            "disco diff does-not-exist --output-format json",
         ),
         (
             &[
@@ -3704,7 +3704,7 @@ fn diff_trailing_json_after_malformed_args_is_bounded_json_3129() {
                 "--output-format",
                 "json",
             ][..],
-            "claw diff --cached --bogus-flag --output-format json",
+            "disco diff --cached --bogus-flag --output-format json",
         ),
     ] {
         assert_diff_unexpected_extra_args_json(&root, args, label);
@@ -3766,7 +3766,7 @@ fn assert_diff_unexpected_extra_args_json(root: &Path, args: &[&str], label: &st
 
 #[test]
 fn resume_non_slash_trailing_arg_has_typed_error_kind_and_hint_768() {
-    // #768: `claw --resume latest compact` (missing leading /) returned
+    // #768: `disco --resume latest compact` (missing leading /) returned
     // error_kind:"unknown" + hint:null. Resume is orchestration-critical;
     // wrappers need a machine-readable signal with a recovery hint.
     let root = unique_temp_dir("resume-invalid-arg-768");
@@ -3779,7 +3779,7 @@ fn resume_non_slash_trailing_arg_has_typed_error_kind_and_hint_768() {
     );
     assert!(
         !output.status.success(),
-        "claw --resume latest compact should exit non-zero"
+        "disco --resume latest compact should exit non-zero"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3808,7 +3808,7 @@ fn resume_non_slash_trailing_arg_has_typed_error_kind_and_hint_768() {
 
 #[test]
 fn session_with_unknown_subcommand_returns_interactive_only_not_credentials_767() {
-    // #767: `claw session bogus` bypassed all guards and fell through to
+    // #767: `disco session bogus` bypassed all guards and fell through to
     // CliAction::Prompt, reaching the credential-check gate and returning
     // error_kind:"missing_credentials" instead of a structured routing error.
     // Fix: explicit "session" match arm returns interactive_only guidance.
@@ -3819,7 +3819,7 @@ fn session_with_unknown_subcommand_returns_interactive_only_not_credentials_767(
         let output = run_claw(&root, &["--output-format", "json", "session", sub], &[]);
         assert!(
             !output.status.success(),
-            "claw session {sub} should exit non-zero"
+            "disco session {sub} should exit non-zero"
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3827,18 +3827,18 @@ fn session_with_unknown_subcommand_returns_interactive_only_not_credentials_767(
         let json_line = stdout
             .lines()
             .find(|l| l.trim_start().starts_with('{'))
-            .unwrap_or_else(|| panic!("claw session {sub} stderr should contain JSON"));
+            .unwrap_or_else(|| panic!("disco session {sub} stderr should contain JSON"));
         let parsed: serde_json::Value =
             serde_json::from_str(json_line).expect("error envelope should be valid JSON");
 
         assert_eq!(
             parsed["error_kind"], "interactive_only",
-            "claw session {sub} must return error_kind:interactive_only (#767), not missing_credentials"
+            "disco session {sub} must return error_kind:interactive_only (#767), not missing_credentials"
         );
         let hint = parsed["hint"].as_str().unwrap_or("");
         assert!(
             !hint.is_empty(),
-            "claw session {sub} must return non-null hint (#767)"
+            "disco session {sub} must return non-null hint (#767)"
         );
         assert!(
             hint.contains("/session") || hint.contains("--resume"),
@@ -3849,8 +3849,8 @@ fn session_with_unknown_subcommand_returns_interactive_only_not_credentials_767(
 
 #[test]
 fn slash_only_verbs_with_args_return_interactive_only_not_credentials_770() {
-    // #770: `claw cost breakdown`, `claw clear --force`, `claw memory reset`,
-    // and `claw ultraplan bogus` all fell through to CliAction::Prompt and
+    // #770: `disco cost breakdown`, `disco clear --force`, `disco memory reset`,
+    // and `disco ultraplan bogus` all fell through to CliAction::Prompt and
     // reached the credential gate, returning error_kind:"missing_credentials".
     // These remain slash-only commands; multi-token invocations should return
     // interactive_only guidance. `model` is now a local bounded surface (#807).
@@ -3907,7 +3907,7 @@ fn slash_only_verbs_with_args_return_interactive_only_not_credentials_770() {
 
 #[test]
 fn agents_plugins_mcp_unknown_subcommand_have_hint_774() {
-    // #774: `claw agents bogus`, `claw plugins bogus`, `claw mcp bogus` returned
+    // #774: `disco agents bogus`, `disco plugins bogus`, `disco mcp bogus` returned
     // hint:null despite having correct error_kind. Fixed by adding \n delimiter
     // to error strings in commands/src/lib.rs and explicit hint in mcp JSON envelope.
     let root = unique_temp_dir("unknown-subcommands-774");
@@ -4049,20 +4049,20 @@ fn interactive_only_guard_batch_769_to_771() {
     );
     assert!(
         !model_output.status.success(),
-        "claw model opus extra should exit non-zero"
+        "disco model opus extra should exit non-zero"
     );
     let model_stdout = String::from_utf8_lossy(&model_output.stdout);
     let model_json: serde_json::Value = serde_json::from_str(model_stdout.trim())
-        .unwrap_or_else(|_| panic!("claw model opus extra should emit JSON, got: {model_stdout}"));
+        .unwrap_or_else(|_| panic!("disco model opus extra should emit JSON, got: {model_stdout}"));
     assert_eq!(
         model_json["error_kind"], "unexpected_extra_args",
-        "claw model opus extra should now stay local and typed (#807), not missing_credentials: {model_json}"
+        "disco model opus extra should now stay local and typed (#807), not missing_credentials: {model_json}"
     );
     assert!(
         model_json["hint"]
             .as_str()
             .is_some_and(|hint| !hint.is_empty()),
-        "claw model opus extra should include a usage hint: {model_json}"
+        "disco model opus extra should include a usage hint: {model_json}"
     );
 
     for args in cases {
@@ -4225,7 +4225,7 @@ fn resume_skills_invocation_is_typed_interactive_only_779() {
 
 #[test]
 fn acp_unsupported_invocation_has_hint_782() {
-    // #782: `claw acp start` returned error_kind:unsupported_acp_invocation but hint:null
+    // #782: `disco acp start` returned error_kind:unsupported_acp_invocation but hint:null
     // because the remediation text was on the same line as the error message.
     // Fix: add \n-delimited hint so split_error_hint extracts it.
     let root = unique_temp_dir("acp-unsupported-782");
@@ -4262,7 +4262,7 @@ fn acp_unsupported_invocation_has_hint_782() {
 
 #[test]
 fn init_json_envelope_has_hint_and_already_initialized_783() {
-    // #783: claw --output-format json init was missing the hint field entirely.
+    // #783: disco --output-format json init was missing the hint field entirely.
     // Also added already_initialized: bool so orchestrators can detect the idempotent
     // case without checking created.len() == 0.
     let root = unique_temp_dir("init-hint-783");
@@ -4408,8 +4408,8 @@ fn init_json_envelope_has_hint_and_already_initialized_783() {
 
 #[test]
 fn export_arg_errors_have_typed_kind_and_hint_784() {
-    // #784: `claw export --output` (missing flag value) returned error_kind:"unknown" + hint:null.
-    // `claw export a.md b.md` (extra positional) also returned unknown+null.
+    // #784: `disco export --output` (missing flag value) returned error_kind:"unknown" + hint:null.
+    // `disco export a.md b.md` (extra positional) also returned unknown+null.
     // Both export arg errors now use typed prefixes + usage hint.
     let root = unique_temp_dir("export-arg-errors-784");
     fs::create_dir_all(&root).expect("temp dir");
@@ -4476,7 +4476,7 @@ fn export_arg_errors_have_typed_kind_and_hint_784() {
 
 #[test]
 fn unknown_subcommand_returns_typed_kind_785() {
-    // #785: `claw dump` (a near-miss for dump-manifests) returned error_kind:"unknown"
+    // #785: `disco dump` (a near-miss for dump-manifests) returned error_kind:"unknown"
     // because the classifier had no arm for "unknown subcommand:" prose prefix.
     // Fix: added "unknown_subcommand" arm in classify_error_kind.
     let root = unique_temp_dir("unknown-subcommand-785");
@@ -4513,7 +4513,7 @@ fn unknown_subcommand_returns_typed_kind_785() {
 
 #[test]
 fn dump_manifests_missing_dir_has_typed_kind_and_hint_786() {
-    // #786: `claw dump-manifests --manifests-dir` (no value) and `--manifests-dir=` (empty)
+    // #786: `disco dump-manifests --manifests-dir` (no value) and `--manifests-dir=` (empty)
     // both emitted plain "--manifests-dir requires a path" with error_kind:"unknown" + hint:null.
     // Fix: use missing_flag_value: prefix + \n usage hint.
     let root = unique_temp_dir("dump-manifests-missing-dir-786");
@@ -4590,7 +4590,7 @@ fn dump_manifests_missing_dir_has_typed_kind_and_hint_786() {
 
 #[test]
 fn resume_directory_path_returns_typed_kind_and_hint_787() {
-    // #787: `claw --resume /tmp` (directory instead of .jsonl file) returned
+    // #787: `disco --resume /tmp` (directory instead of .jsonl file) returned
     // error_kind:"session_load_failed" + hint:null. The OS error "Is a directory (os error 21)"
     // had no \n delimiter so split_error_hint returned None, and the resume error path
     // didn't call fallback_hint_for_error_kind.
@@ -4643,7 +4643,7 @@ fn resume_directory_path_returns_typed_kind_and_hint_787() {
 
 #[test]
 fn skills_show_not_found_emits_single_json_object_788() {
-    // #788: `claw --output-format json skills show no-such-skill` emitted TWO JSON objects:
+    // #788: `disco --output-format json skills show no-such-skill` emitted TWO JSON objects:
     // one from the skills handler (action:"show", status:"error") and a second from the
     // top-level error handler (action:"abort"). The skills handler returned Err() after
     // printing its JSON, which caused the ? propagation to trigger a duplicate envelope.
@@ -4745,7 +4745,7 @@ fn skills_show_not_found_emits_single_json_object_788() {
 
 #[test]
 fn agents_show_not_found_exits_nonzero_789() {
-    // #789: `claw --output-format json agents show <not-found>` returned exit 0 despite
+    // #789: `disco --output-format json agents show <not-found>` returned exit 0 despite
     // emitting status:"error". print_agents had no error check — just println + Ok(()).
     // Skills was fixed in #788 (exit 1 via process::exit); agents/plugins had the same gap.
     let root = unique_temp_dir("agents-show-exit-789");
@@ -4780,7 +4780,7 @@ fn agents_show_not_found_exits_nonzero_789() {
 
 #[test]
 fn plugins_show_not_found_exits_nonzero_789() {
-    // #789: same as agents — `claw --output-format json plugins show <not-found>` exited 0
+    // #789: same as agents — `disco --output-format json plugins show <not-found>` exited 0
     // despite status:"error". The not-found branch used `return Ok(())` instead of exit(1).
     let root = unique_temp_dir("plugins-show-exit-789");
     fs::create_dir_all(&root).expect("temp dir");
@@ -4814,7 +4814,7 @@ fn plugins_show_not_found_exits_nonzero_789() {
 
 #[test]
 fn system_prompt_unknown_option_returns_typed_kind_790() {
-    // #790: `claw --output-format json system-prompt bogus` returned error_kind:"unknown" + hint:null.
+    // #790: `disco --output-format json system-prompt bogus` returned error_kind:"unknown" + hint:null.
     // The unknown-option branch emitted plain "unknown system-prompt option: bogus" with no typed
     // prefix. Fix: use unknown_option: prefix + \n usage hint.
     let root = unique_temp_dir("system-prompt-unknown-opt-790");
@@ -4878,9 +4878,9 @@ fn system_prompt_unknown_option_returns_typed_kind_790() {
 
 #[test]
 fn config_extra_args_have_non_null_hint_791() {
-    // #791: `claw config show bogus-key` and `claw config set a b` returned
+    // #791: `disco config show bogus-key` and `disco config set a b` returned
     // error_kind:"unexpected_extra_args" + hint:null because the error message
-    // "unexpected extra arguments after `claw config ...`: ..." had no \n delimiter.
+    // "unexpected extra arguments after `disco config ...`: ..." had no \n delimiter.
     // Fix: appended \n + usage hint to the format string.
     let root = unique_temp_dir("config-extra-args-791");
     fs::create_dir_all(&root).expect("temp dir");
@@ -4947,7 +4947,7 @@ fn config_extra_args_have_non_null_hint_791() {
 
 #[test]
 fn agents_list_flag_shaped_filter_returns_unknown_option_792() {
-    // #792: `claw --output-format json agents list --bogus-flag` silently returned
+    // #792: `disco --output-format json agents list --bogus-flag` silently returned
     // status:"ok" count:0 instead of an error. The list filter arm in
     // handle_agents_slash_command_json treated "--bogus-flag" as a name substring
     // filter (no agents match), producing a false-positive empty success result.
@@ -4988,14 +4988,14 @@ fn agents_list_flag_shaped_filter_returns_unknown_option_792() {
         .as_str()
         .expect("unknown_option must have hint (#792)");
     assert!(
-        h.contains("claw agents list") || h.contains("filter"),
+        h.contains("disco agents list") || h.contains("filter"),
         "hint should reference correct usage, got: {h:?}"
     );
 }
 
 #[test]
 fn skills_list_flag_shaped_filter_returns_unknown_option_792() {
-    // #792: same gap as agents — `claw skills list --bogus-flag` returned success
+    // #792: same gap as agents — `disco skills list --bogus-flag` returned success
     // with empty list instead of unknown_option error.
     let root = unique_temp_dir("skills-list-flag-792");
     fs::create_dir_all(&root).expect("temp dir");
@@ -5032,14 +5032,14 @@ fn skills_list_flag_shaped_filter_returns_unknown_option_792() {
     assert!(
         j["hint"]
             .as_str()
-            .is_some_and(|h| h.contains("claw skills list") || h.contains("filter")),
+            .is_some_and(|h| h.contains("disco skills list") || h.contains("filter")),
         "hint should reference correct usage (#792)"
     );
 }
 
 #[test]
 fn plugins_list_flag_shaped_filter_returns_cli_parse_on_stdout_793_817() {
-    // #793: `claw plugins list --bogus-flag` silently returned status:"ok" with empty
+    // #793: `disco plugins list --bogus-flag` silently returned status:"ok" with empty
     // plugins list instead of an error. The list filter branch in print_plugins treated
     // "--bogus-flag" as an id substring filter and found no matches, producing a false-positive.
     // #817: in JSON mode, handled local parse errors now return error_kind:"cli_parse"
@@ -5089,7 +5089,7 @@ fn plugins_list_flag_shaped_filter_returns_cli_parse_on_stdout_793_817() {
 
 #[test]
 fn plugins_uninstall_not_found_has_hint_793() {
-    // #793: `claw plugins uninstall no-such-plugin` returned plugin_not_found + hint:null.
+    // #793: `disco plugins uninstall no-such-plugin` returned plugin_not_found + hint:null.
     // The error propagated from plugins_command_payload_for via ? with no \n delimiter;
     // split_error_hint returned None and plugin_not_found wasn't in the fallback table.
     // Fix: added "plugin_not_found" entry to fallback_hint_for_error_kind().
@@ -5129,14 +5129,14 @@ fn plugins_uninstall_not_found_has_hint_793() {
         .as_str()
         .expect("plugin_not_found must have non-null hint (#793)");
     assert!(
-        h.contains("plugins list") || h.contains("claw plugins"),
+        h.contains("plugins list") || h.contains("disco plugins"),
         "hint should reference plugins list, got: {h:?}"
     );
 }
 
 #[test]
 fn plugins_install_not_found_path_returns_typed_kind_794() {
-    // #794: `claw plugins install /nonexistent/path` returned error_kind:"unknown" + hint:null.
+    // #794: `disco plugins install /nonexistent/path` returned error_kind:"unknown" + hint:null.
     // The message "plugin source ... was not found" had no classifier arm; fell to "unknown".
     // Fix: added "plugin_source_not_found" classifier arm + fallback hint table entry.
     let root = unique_temp_dir("plugins-install-794");
@@ -5433,7 +5433,7 @@ fn agents_create_scaffolds_toml_and_lists_locally_431() {
 
 #[test]
 fn agents_show_extra_positional_arg_returns_unexpected_extra_796() {
-    // #796: `claw agents show <name> <extra>` treated the full "name extra" as a single
+    // #796: `disco agents show <name> <extra>` treated the full "name extra" as a single
     // agent name, producing agent_not_found for "name extra" instead of flagging the
     // unexpected extra argument. Fix: detect space-containing "name" and return
     // unexpected_extra_args with usage hint.
@@ -5473,14 +5473,14 @@ fn agents_show_extra_positional_arg_returns_unexpected_extra_796() {
         .as_str()
         .expect("unexpected_extra_args must have hint (#796)");
     assert!(
-        h.contains("claw agents show") || h.contains("Usage"),
+        h.contains("disco agents show") || h.contains("Usage"),
         "hint should reference usage, got: {h:?}"
     );
 }
 
 #[test]
 fn skills_show_extra_positional_arg_returns_unexpected_extra_796() {
-    // #796: same gap as agents — `claw skills show <name> <extra>` treated "name extra"
+    // #796: same gap as agents — `disco skills show <name> <extra>` treated "name extra"
     // as a single skill name → skill_not_found. Fix: detect space-containing name.
     let root = unique_temp_dir("skills-show-extra-796");
     fs::create_dir_all(&root).expect("temp dir");
@@ -5517,16 +5517,16 @@ fn skills_show_extra_positional_arg_returns_unexpected_extra_796() {
     assert!(
         j["hint"]
             .as_str()
-            .is_some_and(|h| h.contains("claw skills show") || h.contains("Usage")),
+            .is_some_and(|h| h.contains("disco skills show") || h.contains("Usage")),
         "hint should reference usage (#796)"
     );
 }
 
 #[test]
 fn plugins_extra_args_have_non_null_hint_797() {
-    // #797: `claw plugins show <name> <extra>` returned unexpected_extra_args + hint:null.
+    // #797: `disco plugins show <name> <extra>` returned unexpected_extra_args + hint:null.
     // The plugins arg parser at the top level emitted "unexpected extra arguments after
-    // `claw plugins show ...`: ..." with no \n delimiter. Parity with #791 config fix.
+    // `disco plugins show ...`: ..." with no \n delimiter. Parity with #791 config fix.
     let root = unique_temp_dir("plugins-extra-args-797");
     fs::create_dir_all(&root).expect("temp dir");
     std::process::Command::new("git")
@@ -5620,14 +5620,14 @@ fn plugins_list_trailing_dash_text_error_stays_on_stderr_817() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stderr.contains("[error-kind: cli_parse]"), "{stderr}");
     assert!(
-        stderr.contains("unknown option for `claw plugins list`: --"),
+        stderr.contains("unknown option for `disco plugins list`: --"),
         "{stderr}"
     );
 }
 
 #[test]
 fn empty_prompt_has_non_null_hint_798() {
-    // #798: `claw --output-format json ""` returned empty_prompt + hint:null.
+    // #798: `disco --output-format json ""` returned empty_prompt + hint:null.
     // The error message "empty prompt: provide a subcommand..." had no \n delimiter.
     let root = unique_temp_dir("empty-prompt-798");
     fs::create_dir_all(&root).expect("temp dir");
@@ -5661,7 +5661,7 @@ fn empty_prompt_has_non_null_hint_798() {
 
 #[test]
 fn diff_non_git_dir_has_error_kind_and_hint_801() {
-    // #801: `claw --output-format json diff` in a non-git directory returned
+    // #801: `disco --output-format json diff` in a non-git directory returned
     // status:"error" + result:"no_git_repo" but had no error_kind, hint, or
     // message fields — violating the error envelope contract. Fix: added all
     // three fields to the no_git_repo JSON branch.
@@ -5865,7 +5865,7 @@ fn multi_word_unknown_subcommand_json_emits_command_not_found_826() {
     );
     let hint = j["hint"].as_str().unwrap_or_default();
     assert!(
-        hint.contains("claw prompt") || hint.contains("--help"),
+        hint.contains("disco prompt") || hint.contains("--help"),
         "hint should explain prompt/command recovery, got: {hint:?}"
     );
     assert!(
@@ -6046,7 +6046,7 @@ fn resume_safe_interactive_only_hint_includes_resume_suggestion() {
 
 // --- CP-D: staged prompt-enhancement harness -------------------------------
 //
-// These are deliberately hermetic. `claw enhance` reports the triage decision
+// These are deliberately hermetic. `disco enhance` reports the triage decision
 // without contacting the daemon, so the harness's routing can be pinned in CI
 // on a machine with no Ollama installed at all.
 

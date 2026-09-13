@@ -56,7 +56,7 @@ fn resumed_binary_accepts_slash_commands_with_arguments() {
     assert!(stdout.contains("Session cleared"));
     assert!(stdout.contains("Mode             resumed session reset"));
     assert!(stdout.contains("Previous session"));
-    assert!(stdout.contains("Resume previous  claw --resume"));
+    assert!(stdout.contains("Resume previous  disco --resume"));
     assert!(stdout.contains("Backup           "));
     assert!(stdout.contains("Session file     "));
 
@@ -622,12 +622,12 @@ fn workspace_session(root: &Path) -> Session {
 }
 
 fn run_claw_with_env(current_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_claw"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_disco"));
     command.current_dir(current_dir).args(args);
     for (key, value) in envs {
         command.env(key, value);
     }
-    command.output().expect("claw should launch")
+    command.output().expect("disco should launch")
 }
 
 fn unique_temp_dir(label: &str) -> PathBuf {

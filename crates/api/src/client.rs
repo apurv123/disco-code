@@ -1,5 +1,4 @@
 use crate::error::ApiError;
-use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 use crate::providers::openai_compat::{self, OpenAiCompatClient};
 use crate::providers::ProviderKind;
 use crate::types::{MessageRequest, MessageResponse, StreamEvent};
@@ -41,26 +40,6 @@ impl ProviderClient {
     #[must_use]
     pub fn base_url(&self) -> &str {
         self.inner.base_url()
-    }
-
-    /// Retained as a no-op for call-site compatibility.
-    ///
-    /// Prompt caching was an Anthropic server-side feature. Ollama keeps its own
-    /// KV cache internally and exposes no equivalent control, so there is
-    /// nothing to attach.
-    #[must_use]
-    pub fn with_prompt_cache(self, _prompt_cache: PromptCache) -> Self {
-        self
-    }
-
-    #[must_use]
-    pub const fn prompt_cache_stats(&self) -> Option<PromptCacheStats> {
-        None
-    }
-
-    #[must_use]
-    pub const fn take_last_prompt_cache_record(&self) -> Option<PromptCacheRecord> {
-        None
     }
 
     pub async fn send_message(

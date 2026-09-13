@@ -922,7 +922,7 @@ mod tests {
                      1. Add the CLI flag\n\
                      2. Thread it to the renderer\n\
                      CRITERIA:\n\
-                     - `claw status --json` emits valid JSON\n\
+                     - `disco status --json` emits valid JSON\n\
                      - existing text output is unchanged";
         let plan = parse_plan(reply);
         assert_eq!(

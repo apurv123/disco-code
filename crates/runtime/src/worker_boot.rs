@@ -1727,7 +1727,7 @@ mod tests {
             .expect("tool permission observe should succeed");
 
         let timed_out = registry
-            .observe_startup_timeout(&worker.worker_id, "claw prompt", true, true)
+            .observe_startup_timeout(&worker.worker_id, "disco prompt", true, true)
             .expect("startup timeout observe should succeed");
         let event = timed_out
             .events
@@ -2189,7 +2189,7 @@ mod tests {
 
         // Now simulate startup timeout
         let timed_out = registry
-            .observe_startup_timeout(&worker.worker_id, "claw prompt", true, true)
+            .observe_startup_timeout(&worker.worker_id, "disco prompt", true, true)
             .expect("startup timeout observe should succeed");
 
         let event = timed_out
@@ -2227,7 +2227,7 @@ mod tests {
 
         // Simulate startup timeout while prompt is still in flight
         let timed_out = registry
-            .observe_startup_timeout(&worker.worker_id, "claw prompt", true, true)
+            .observe_startup_timeout(&worker.worker_id, "disco prompt", true, true)
             .expect("startup timeout observe should succeed");
 
         let event = timed_out
@@ -2275,7 +2275,7 @@ mod tests {
             .expect("prompt send should record a prompt timestamp");
 
         let timed_out = registry
-            .observe_startup_timeout(&worker.worker_id, "claw worker", true, true)
+            .observe_startup_timeout(&worker.worker_id, "disco worker", true, true)
             .expect("startup timeout observe should succeed");
 
         let event = timed_out

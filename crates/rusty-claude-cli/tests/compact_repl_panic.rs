@@ -63,7 +63,7 @@ fn run_claw_repl(
     home: &std::path::Path,
     stdin: &str,
 ) -> Output {
-    let mut command = python_pty_command(env!("CARGO_BIN_EXE_claw"));
+    let mut command = python_pty_command(env!("CARGO_BIN_EXE_disco"));
     let mut child = command
         .current_dir(cwd)
         .env_clear()
@@ -76,7 +76,7 @@ fn run_claw_repl(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("claw should launch");
+        .expect("disco should launch");
 
     child
         .stdin
@@ -85,7 +85,7 @@ fn run_claw_repl(
         .write_all(stdin.as_bytes())
         .expect("stdin should write");
 
-    child.wait_with_output().expect("claw should finish")
+    child.wait_with_output().expect("disco should finish")
 }
 
 fn python_pty_command(claw: &str) -> Command {

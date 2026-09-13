@@ -138,14 +138,6 @@ pub fn resolve_model_alias(model: &str) -> String {
 /// Describes the local daemon backing every request.
 ///
 /// This used to vary per model so that a name could select a hosted backend and
-/// its credentials. Inference is now local-only, so the answer is constant. It
-/// stays an `Option` because callers treat `None` as "not a routable model" and
-/// collapsing that would ripple further than this checkpoint.
-#[must_use]
-pub fn metadata_for_model(_model: &str) -> Option<ProviderMetadata> {
-    Some(local_metadata())
-}
-
 /// Metadata for the local daemon.
 ///
 /// `auth_env` names `OLLAMA_HOST` rather than a key variable: Ollama needs no
@@ -161,15 +153,6 @@ pub const fn local_metadata() -> ProviderMetadata {
     }
 }
 
-
-#[must_use]
-pub fn strip_provider_prefix(canonical_model: &str) -> String {
-    if let Some(pos) = canonical_model.find('/') {
-        canonical_model[pos + 1..].to_string()
-    } else {
-        canonical_model.to_string()
-    }
-}
 
 #[must_use]
 pub fn provider_diagnostics_for_model(model: &str) -> ProviderDiagnostics {

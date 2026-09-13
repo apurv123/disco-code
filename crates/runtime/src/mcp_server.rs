@@ -4,7 +4,7 @@
 //! answers `initialize`, `tools/list`, and `tools/call` requests. The framing
 //! matches the client transport implemented in [`crate::mcp_stdio`] so this
 //! server can be driven by either an external MCP client (e.g. Claude
-//! Desktop) or `claw`'s own [`McpServerManager`](crate::McpServerManager).
+//! Desktop) or `disco`'s own [`McpServerManager`](crate::McpServerManager).
 //!
 //! The server is intentionally small: it exposes a list of pre-built
 //! [`McpTool`] descriptors and delegates `tools/call` to a caller-supplied

@@ -1744,13 +1744,6 @@ fn read_env_non_empty(key: &str) -> Result<Option<String>, ApiError> {
     }
 }
 
-#[must_use]
-pub fn has_api_key(key: &str) -> bool {
-    read_env_non_empty(key)
-        .ok()
-        .and_then(std::convert::identity)
-        .is_some()
-}
 
 #[must_use]
 pub fn read_base_url(config: OpenAiCompatConfig) -> String {
